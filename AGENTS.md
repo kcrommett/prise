@@ -17,6 +17,25 @@ zigdoc std.fmt.allocPrint
 - Format code: `zig fmt .`
 - Run tests: `zig build test`
 
+## Testing
+
+Tests should live alongside the code in the same file, not in separate test files.
+
+Tests automatically use a mock event loop (src/io/mock.zig) instead of the real OS backend. This enables deterministic testing of async operations without actual I/O.
+
+To test async operations:
+1. Create a Loop with `var loop = try io.Loop.init(allocator)`
+2. Submit operations (socket, connect, accept, recv, send, close)
+3. Manually trigger completions using helper methods:
+   - `loop.completeConnect(fd)`
+   - `loop.completeAccept(fd)`
+   - `loop.completeRecv(fd, data)`
+   - `loop.completeSend(fd, bytes_sent)`
+   - `loop.completeWithError(fd, err)`
+4. Run the loop with `try loop.run(.until_done)`
+
+See src/io/mock.zig for examples of testing with the mock event loop.
+
 ## Commit Message Format
 
 **Title (first line):**

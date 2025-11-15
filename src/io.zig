@@ -2,7 +2,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
 
-const backend = switch (builtin.os.tag) {
+const backend = if (builtin.is_test)
+    @import("io/mock.zig")
+else switch (builtin.os.tag) {
     .linux => @import("io/io_uring.zig"),
     .macos => @import("io/kqueue.zig"),
     else => @compileError("unsupported platform"),

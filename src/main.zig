@@ -263,3 +263,123 @@ fn connectUnixSocket(
 
     return client;
 }
+
+test "UnixSocketClient - successful connection" {
+    const testing = std.testing;
+
+    var loop = try io.Loop.init(testing.allocator);
+    defer loop.deinit();
+
+    var connected = false;
+    var fd: posix.socket_t = undefined;
+
+    const State = struct {
+        connected: *bool,
+        fd: *posix.socket_t,
+    };
+
+    var state = State{
+        .connected = &connected,
+        .fd = &fd,
+    };
+
+    const callback = struct {
+        fn cb(l: *io.Loop, completion: io.Completion) anyerror!void {
+            _ = l;
+            const s = completion.userdataCast(State);
+            switch (completion.result) {
+                .socket => |socket_fd| {
+                    s.fd.* = socket_fd;
+                    s.connected.* = true;
+                },
+                .err => |err| return err,
+                else => unreachable,
+            }
+        }
+    }.cb;
+
+    _ = try connectUnixSocket(&loop, "/tmp/test.sock", .{
+        .ptr = &state,
+        .cb = callback,
+    });
+
+    try loop.run(.once);
+    try testing.expect(!connected);
+
+    const socket_fd = blk: {
+        var it = loop.pending.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.kind == .connect) {
+                break :blk entry.value_ptr.fd;
+            }
+        }
+        unreachable;
+    };
+
+    try loop.completeConnect(socket_fd);
+    try loop.run(.once);
+    try testing.expect(connected);
+    try testing.expectEqual(socket_fd, fd);
+}
+
+test "UnixSocketClient - connection refused" {
+    const testing = std.testing;
+
+    var loop = try io.Loop.init(testing.allocator);
+    defer loop.deinit();
+
+    var got_error = false;
+    var err_value: ?anyerror = null;
+
+    const State = struct {
+        got_error: *bool,
+        err_value: *?anyerror,
+    };
+
+    var state = State{
+        .got_error = &got_error,
+        .err_value = &err_value,
+    };
+
+    const callback = struct {
+        fn cb(l: *io.Loop, completion: io.Completion) anyerror!void {
+            _ = l;
+            const s = completion.userdataCast(State);
+            switch (completion.result) {
+                .socket => {},
+                .err => |err| {
+                    s.got_error.* = true;
+                    s.err_value.* = err;
+                },
+                else => unreachable,
+            }
+        }
+    }.cb;
+
+    _ = try connectUnixSocket(&loop, "/tmp/test.sock", .{
+        .ptr = &state,
+        .cb = callback,
+    });
+
+    try loop.run(.once);
+
+    const socket_fd = blk: {
+        var it = loop.pending.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.kind == .connect) {
+                break :blk entry.value_ptr.fd;
+            }
+        }
+        unreachable;
+    };
+
+    try loop.completeWithError(socket_fd, error.ConnectionRefused);
+    try loop.run(.until_done);
+    try testing.expect(got_error);
+    try testing.expectEqual(error.ConnectionRefused, err_value.?);
+}
+
+test {
+    _ = @import("io/mock.zig");
+    _ = @import("server.zig");
+}

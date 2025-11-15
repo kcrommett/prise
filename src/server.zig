@@ -23,8 +23,7 @@ const Client = struct {
                     });
                 }
             },
-            .err => |err| {
-                std.debug.print("Recv error: {}\n", .{err});
+            .err => {
                 client.server.removeClient(client);
             },
             else => unreachable,
@@ -96,9 +95,14 @@ const Server = struct {
                 break;
             }
         }
-        posix.close(client.fd);
+        _ = self.loop.close(client.fd, .{
+            .ptr = null,
+            .cb = struct {
+                fn noop(_: *io.Loop, _: io.Completion) anyerror!void {}
+            }.noop,
+        }) catch {};
         self.allocator.destroy(client);
-        try self.checkExit();
+        self.checkExit() catch {};
     }
 };
 
@@ -148,4 +152,194 @@ pub fn startServer(allocator: std.mem.Allocator, socket_path: []const u8) !void 
     // Cleanup
     posix.close(listen_fd);
     posix.unlink(socket_path) catch {};
+}
+
+test "server lifecycle - shutdown when no clients" {
+    const testing = std.testing;
+
+    var loop = try io.Loop.init(testing.allocator);
+    defer loop.deinit();
+
+    var server: Server = .{
+        .allocator = testing.allocator,
+        .loop = &loop,
+        .listen_fd = 100,
+        .socket_path = "/tmp/test.sock",
+        .clients = std.ArrayList(*Client).empty,
+    };
+    defer server.clients.deinit(testing.allocator);
+
+    server.accept_task = try loop.accept(100, .{
+        .ptr = &server,
+        .cb = Server.onAccept,
+    });
+
+    try testing.expect(server.accepting);
+    try testing.expect(server.shouldExit());
+
+    try server.checkExit();
+
+    try testing.expect(!server.accepting);
+    try testing.expect(server.accept_task == null);
+}
+
+test "server lifecycle - accept client connection" {
+    const testing = std.testing;
+
+    var loop = try io.Loop.init(testing.allocator);
+    defer loop.deinit();
+
+    var server: Server = .{
+        .allocator = testing.allocator,
+        .loop = &loop,
+        .listen_fd = 100,
+        .socket_path = "/tmp/test.sock",
+        .clients = std.ArrayList(*Client).empty,
+    };
+    defer {
+        for (server.clients.items) |client| {
+            testing.allocator.destroy(client);
+        }
+        server.clients.deinit(testing.allocator);
+    }
+
+    server.accept_task = try loop.accept(100, .{
+        .ptr = &server,
+        .cb = Server.onAccept,
+    });
+
+    try loop.completeAccept(100);
+    try loop.run(.once);
+
+    try testing.expectEqual(@as(usize, 1), server.clients.items.len);
+    try testing.expect(server.accepting);
+}
+
+test "server lifecycle - client disconnect triggers shutdown" {
+    const testing = std.testing;
+
+    var loop = try io.Loop.init(testing.allocator);
+    defer loop.deinit();
+
+    var server: Server = .{
+        .allocator = testing.allocator,
+        .loop = &loop,
+        .listen_fd = 100,
+        .socket_path = "/tmp/test.sock",
+        .clients = std.ArrayList(*Client).empty,
+    };
+    defer {
+        for (server.clients.items) |client| {
+            testing.allocator.destroy(client);
+        }
+        server.clients.deinit(testing.allocator);
+    }
+
+    server.accept_task = try loop.accept(100, .{
+        .ptr = &server,
+        .cb = Server.onAccept,
+    });
+
+    try loop.completeAccept(100);
+    try loop.run(.once);
+
+    try testing.expectEqual(@as(usize, 1), server.clients.items.len);
+    const client_fd = server.clients.items[0].fd;
+
+    try loop.completeRecv(client_fd, "");
+    try loop.run(.once);
+
+    try testing.expectEqual(@as(usize, 0), server.clients.items.len);
+    try testing.expect(!server.accepting);
+}
+
+test "server lifecycle - multiple clients" {
+    const testing = std.testing;
+
+    var loop = try io.Loop.init(testing.allocator);
+    defer loop.deinit();
+
+    var server: Server = .{
+        .allocator = testing.allocator,
+        .loop = &loop,
+        .listen_fd = 100,
+        .socket_path = "/tmp/test.sock",
+        .clients = std.ArrayList(*Client).empty,
+    };
+    defer {
+        for (server.clients.items) |client| {
+            testing.allocator.destroy(client);
+        }
+        server.clients.deinit(testing.allocator);
+    }
+
+    server.accept_task = try loop.accept(100, .{
+        .ptr = &server,
+        .cb = Server.onAccept,
+    });
+
+    try loop.completeAccept(100);
+    try loop.run(.once);
+    try testing.expectEqual(@as(usize, 1), server.clients.items.len);
+
+    try loop.completeAccept(100);
+    try loop.run(.once);
+    try testing.expectEqual(@as(usize, 2), server.clients.items.len);
+
+    try loop.completeAccept(100);
+    try loop.run(.once);
+    try testing.expectEqual(@as(usize, 3), server.clients.items.len);
+
+    const client1_fd = server.clients.items[0].fd;
+    const client2_fd = server.clients.items[1].fd;
+    const client3_fd = server.clients.items[2].fd;
+
+    try loop.completeRecv(client2_fd, "");
+    try loop.run(.until_done);
+    try testing.expectEqual(@as(usize, 2), server.clients.items.len);
+
+    try loop.completeRecv(client1_fd, "");
+    try loop.run(.until_done);
+    try testing.expectEqual(@as(usize, 1), server.clients.items.len);
+
+    try loop.completeRecv(client3_fd, "");
+    try loop.run(.until_done);
+    try testing.expectEqual(@as(usize, 0), server.clients.items.len);
+    try testing.expect(!server.accepting);
+}
+
+test "server lifecycle - recv error triggers disconnect" {
+    const testing = std.testing;
+
+    var loop = try io.Loop.init(testing.allocator);
+    defer loop.deinit();
+
+    var server: Server = .{
+        .allocator = testing.allocator,
+        .loop = &loop,
+        .listen_fd = 100,
+        .socket_path = "/tmp/test.sock",
+        .clients = std.ArrayList(*Client).empty,
+    };
+    defer {
+        for (server.clients.items) |client| {
+            testing.allocator.destroy(client);
+        }
+        server.clients.deinit(testing.allocator);
+    }
+
+    server.accept_task = try loop.accept(100, .{
+        .ptr = &server,
+        .cb = Server.onAccept,
+    });
+
+    try loop.completeAccept(100);
+    try loop.run(.once);
+    try testing.expectEqual(@as(usize, 1), server.clients.items.len);
+    const client_fd = server.clients.items[0].fd;
+
+    try loop.completeWithError(client_fd, error.ConnectionReset);
+    try loop.run(.once);
+    try testing.expectEqual(@as(usize, 0), server.clients.items.len);
+    try testing.expect(!server.accepting);
 }
