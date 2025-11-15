@@ -137,6 +137,9 @@ pub fn main() !void {
         if (app.response_received) {
             if (app.pty_id) |pty_id| {
                 std.log.info("Ready with PTY ID: {}", .{pty_id});
+                // Keep connection alive to see terminal output
+                std.log.info("Waiting for terminal output...", .{});
+                std.Thread.sleep(4 * std.time.ns_per_s);
             }
         }
     }

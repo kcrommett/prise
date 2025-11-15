@@ -140,7 +140,10 @@ pub const Pty = struct {
             break :blk env_arr.ptr;
         } else null;
 
-        const err = posix.execvpeZ(argv_z[0].?, @ptrCast(argv_z[0..argv.len :null]), @ptrCast(env_z));
+        const err = if (env_z) |ez|
+            posix.execvpeZ(argv_z[0].?, @ptrCast(argv_z[0..argv.len :null]), @ptrCast(ez))
+        else
+            posix.execveZ(argv_z[0].?, @ptrCast(argv_z[0..argv.len :null]), @ptrCast(std.c.environ));
         std.log.err("execvpe failed: {}", .{err});
         return error.ExecFailed;
     }

@@ -4,6 +4,8 @@ const rpc = @import("rpc.zig");
 const msgpack = @import("msgpack.zig");
 const pty = @import("pty.zig");
 const posix = std.posix;
+const ghostty_vt = @import("ghostty-vt");
+const vt_handler = @import("vt_handler.zig");
 
 const Session = struct {
     id: usize,
@@ -12,14 +14,21 @@ const Session = struct {
     read_thread: ?std.Thread = null,
     running: std.atomic.Value(bool),
     keep_alive: bool = false,
+    terminal: ghostty_vt.Terminal,
+    allocator: std.mem.Allocator,
 
-    fn init(allocator: std.mem.Allocator, id: usize, pty_instance: pty.Pty) !*Session {
+    fn init(allocator: std.mem.Allocator, id: usize, pty_instance: pty.Pty, size: pty.winsize) !*Session {
         const session = try allocator.create(Session);
         session.* = .{
             .id = id,
             .pty = pty_instance,
             .clients = std.ArrayList(*Client).empty,
             .running = std.atomic.Value(bool).init(true),
+            .terminal = try ghostty_vt.Terminal.init(allocator, .{
+                .cols = size.ws_col,
+                .rows = size.ws_row,
+            }),
+            .allocator = allocator,
         };
         return session;
     }
@@ -34,6 +43,7 @@ const Session = struct {
             thread.join();
         }
         self.pty.close();
+        self.terminal.deinit(allocator);
         self.clients.deinit(allocator);
         allocator.destroy(self);
     }
@@ -61,6 +71,24 @@ const Session = struct {
 
     fn readThread(self: *Session, server: *Server) void {
         var buffer: [4096]u8 = undefined;
+
+        var handler = vt_handler.Handler.init(&self.terminal);
+        defer handler.deinit();
+
+        // Set up the write callback so the handler can respond to queries
+        handler.setWriteCallback(self, struct {
+            fn writeToPty(ctx: ?*anyopaque, data: []const u8) !void {
+                const session: *Session = @ptrCast(@alignCast(ctx));
+                _ = posix.write(session.pty.master, data) catch |err| {
+                    std.log.err("Failed to write to PTY: {}", .{err});
+                    return err;
+                };
+            }
+        }.writeToPty);
+
+        var stream = vt_handler.Stream.initAlloc(self.allocator, handler);
+        defer stream.deinit();
+
         while (self.running.load(.seq_cst)) {
             const n = posix.read(self.pty.master, &buffer) catch |err| {
                 if (err == error.WouldBlock) {
@@ -71,6 +99,21 @@ const Session = struct {
                 break;
             };
             if (n == 0) break;
+
+            // Parse the data through ghostty-vt to update terminal state
+            stream.nextSlice(buffer[0..n]) catch |err| {
+                std.log.err("Failed to parse VT sequences: {}", .{err});
+                continue;
+            };
+
+            // Log the terminal screen contents
+            const screen = self.terminal.plainString(self.allocator) catch |err| {
+                std.log.err("Failed to get terminal screen: {}", .{err});
+                self.broadcast(server.loop, buffer[0..n]);
+                continue;
+            };
+            defer self.allocator.free(screen);
+            std.log.debug("Session {} screen:\n{s}", .{ self.id, screen });
 
             self.broadcast(server.loop, buffer[0..n]);
         }
@@ -219,7 +262,7 @@ const Server = struct {
             const session_id = self.next_session_id;
             self.next_session_id += 1;
 
-            const session = try Session.init(self.allocator, session_id, pty_instance);
+            const session = try Session.init(self.allocator, session_id, pty_instance, size);
             try self.sessions.put(session_id, session);
 
             session.read_thread = try std.Thread.spawn(.{}, Session.readThread, .{ session, self });
