@@ -21,31 +21,31 @@ Attributes) by writing directly to the PTY.
 
 # Client Architecture
 
-1. **Main Thread (Input)**:
+1. **Main Thread (Event Loop)**:
    - Responsible for initializing the UI (raw mode, entering alternate screen) and
    establishing the connection to the Server.
-   - Spawns the **Socket Thread**.
-   - **Loop**: Performs blocking reads on the local PTY/TTY (Input).
-   - Writes input/requests to the Server Socket.
-   - Handles `SIGWINCH` (or delegates to a signal handler) by sending a resize
-   request to the server.
-
-2. **Socket Thread (Output/Renderer)**:
-   - **Loop**: Reads messages from the Server Socket.
+   - Runs the `io.Loop`, listening to:
+     - **Server Socket**: Reads messages from server (screen updates, events).
+     - **Pipe**: Receives input and resize notifications from TTY Thread.
    - Updates the local screen state based on Server messages.
    - Paints the screen to the local terminal (`stdout`).
-   - Handles server-side events (like `Resize` notifications) to keep the
-   renderer in sync.
+   - Parses input from the pipe and sends events to the Server Socket.
+
+2. **TTY Thread (Input & Signal Handler)**:
+   - **Loop**: Performs blocking reads on the local TTY (Input).
+   - Forwards raw input to the Main Thread via pipe.
+   - Handles `SIGWINCH` by serializing resize into in-band-resize notation
+   and sending it through the pipe.
 
 3. **Synchronization Flow**:
    - **Resize**: 
-     1. Client detects resize -> Sends request to Server.
-     2. Server resizes internal PTY -> Sends resize event to Client.
-     3. Socket Thread receives event -> Updates renderer state -> Repaints.
+     1. TTY Thread detects `SIGWINCH` -> Serializes to in-band-resize -> Sends to pipe.
+     2. Main Thread receives from pipe -> Sends resize request to Server.
+     3. Server resizes internal PTY -> Sends resize event to Client.
+     4. Main Thread receives event -> Updates renderer state -> Repaints.
    - **Shutdown**:
-     - **User Quit**: Input thread sends close request -> Server closes
-     connection -> Socket thread detects close -> Exits process.
-     - **Server Quit**: Socket thread detects disconnect -> Exits process.
+     - **User Quit**: TTY thread sends close request via pipe -> Main thread forwards to server -> Server closes connection -> Main thread detects close -> Exits process.
+     - **Server Quit**: Main thread detects disconnect -> Exits process.
 
 # Client Data Model
 
