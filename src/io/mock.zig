@@ -231,6 +231,22 @@ pub const Loop = struct {
         }
     }
 
+    pub fn cancelByFd(self: *Loop, fd: posix.socket_t) void {
+        var ids_to_cancel = std.ArrayList(usize){};
+        defer ids_to_cancel.deinit(self.allocator);
+
+        var it = self.pending.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.kind != .timer and entry.value_ptr.fd == fd) {
+                ids_to_cancel.append(self.allocator, entry.key_ptr.*) catch {};
+            }
+        }
+
+        for (ids_to_cancel.items) |id| {
+            self.cancel(id) catch {};
+        }
+    }
+
     pub fn run(self: *Loop, mode: RunMode) !void {
         while (true) {
             if (mode == .until_done and self.pending.count() == 0) break;
@@ -597,6 +613,56 @@ test "mock loop - cancel operation" {
 
     try testing.expectEqual(@as(usize, 0), loop.pending.count());
     try testing.expectEqual(@as(usize, 0), loop.completions.items.len);
+
+    try loop.run(.until_done);
+    try testing.expect(!completed);
+}
+
+test "mock loop - cancelByFd operation" {
+    const testing = std.testing;
+
+    var loop = try Loop.init(testing.allocator);
+    defer loop.deinit();
+
+    var completed = false;
+
+    const State = struct {
+        completed: *bool,
+    };
+
+    var state = State{
+        .completed = &completed,
+    };
+
+    const callback = struct {
+        fn cb(l: *Loop, completion: root.Completion) !void {
+            _ = l;
+            const s = completion.userdataCast(State);
+            switch (completion.result) {
+                .connect => s.completed.* = true,
+                .err => |err| return err,
+                else => unreachable,
+            }
+        }
+    }.cb;
+
+    const addr = std.mem.zeroes(posix.sockaddr);
+    // Use a specific FD
+    const fd: posix.socket_t = 123;
+
+    // We need to manually register a task with FD because connect() allocates a new FD or uses one?
+    // In mock.zig, connect takes fd.
+
+    _ = try loop.connect(fd, &addr, @sizeOf(posix.sockaddr), .{
+        .ptr = &state,
+        .cb = callback,
+    });
+
+    try testing.expectEqual(@as(usize, 1), loop.pending.count());
+
+    loop.cancelByFd(fd);
+
+    try testing.expectEqual(@as(usize, 0), loop.pending.count());
 
     try loop.run(.until_done);
     try testing.expect(!completed);

@@ -66,6 +66,9 @@ const Pty = struct {
             self.render_timer = null;
         }
 
+        // Cancel pending read on dirty signal pipe
+        loop.cancelByFd(self.pipe_fds[0]);
+
         posix.close(self.pipe_fds[0]);
         posix.close(self.pipe_fds[1]);
         self.terminal.deinit(allocator);
@@ -617,6 +620,7 @@ const Server = struct {
     next_session_id: usize = 0,
     accepting: bool = true,
     accept_task: ?io.Task = null,
+    exit_on_idle: bool = false,
 
     fn handleRequest(self: *Server, client: *Client, method: []const u8, params: msgpack.Value) !msgpack.Value {
         if (std.mem.eql(u8, method, "ping")) {
@@ -789,8 +793,7 @@ const Server = struct {
     }
 
     fn shouldExit(self: *Server) bool {
-        _ = self;
-        return false;
+        return self.exit_on_idle and self.clients.items.len == 0;
     }
 
     fn cleanupSessionsForClient(self: *Server, client: *Client) void {
@@ -885,6 +888,12 @@ const Server = struct {
         }
         client.send_queue.deinit(self.allocator);
 
+        // Free in-flight send buffer
+        if (client.send_buffer) |buf| {
+            self.allocator.free(buf);
+            client.send_buffer = null;
+        }
+
         client.attached_sessions.deinit(self.allocator);
         client.seen_styles.deinit();
 
@@ -894,6 +903,10 @@ const Server = struct {
                 break;
             }
         }
+
+        // Cancel any pending tasks for this client's FD before closing it
+        self.loop.cancelByFd(client.fd);
+
         _ = self.loop.close(client.fd, .{
             .ptr = null,
             .cb = struct {
@@ -1273,6 +1286,7 @@ test "server lifecycle - shutdown when no clients" {
         .socket_path = "/tmp/test.sock",
         .clients = std.ArrayList(*Client).empty,
         .ptys = std.AutoHashMap(usize, *Pty).init(testing.allocator),
+        .exit_on_idle = true,
     };
     defer server.clients.deinit(testing.allocator);
     defer server.ptys.deinit();
@@ -1338,6 +1352,7 @@ test "server lifecycle - client disconnect triggers shutdown" {
         .socket_path = "/tmp/test.sock",
         .clients = std.ArrayList(*Client).empty,
         .ptys = std.AutoHashMap(usize, *Pty).init(testing.allocator),
+        .exit_on_idle = true,
     };
     defer {
         for (server.clients.items) |client| {
@@ -1378,6 +1393,7 @@ test "server lifecycle - multiple clients" {
         .socket_path = "/tmp/test.sock",
         .clients = std.ArrayList(*Client).empty,
         .ptys = std.AutoHashMap(usize, *Pty).init(testing.allocator),
+        .exit_on_idle = true,
     };
     defer {
         for (server.clients.items) |client| {
@@ -1435,6 +1451,7 @@ test "server lifecycle - recv error triggers disconnect" {
         .socket_path = "/tmp/test.sock",
         .clients = std.ArrayList(*Client).empty,
         .ptys = std.AutoHashMap(usize, *Pty).init(testing.allocator),
+        .exit_on_idle = true,
     };
     defer {
         for (server.clients.items) |client| {

@@ -14,6 +14,7 @@ pub const Loop = struct {
         kind: OpKind,
         buf: []u8 = &.{},
         timespec: linux.kernel_timespec = undefined,
+        fd: posix.socket_t = undefined,
     };
 
     const OpKind = enum {
@@ -74,6 +75,7 @@ pub const Loop = struct {
         try self.pending.put(id, .{
             .ctx = ctx,
             .kind = .connect,
+            .fd = fd,
         });
 
         const sqe = try self.ring.connect(@intCast(fd), addr, addr_len);
@@ -93,6 +95,7 @@ pub const Loop = struct {
         try self.pending.put(id, .{
             .ctx = ctx,
             .kind = .accept,
+            .fd = fd,
         });
 
         const sqe = try self.ring.accept(@intCast(fd), null, null, 0);
@@ -114,6 +117,7 @@ pub const Loop = struct {
             .ctx = ctx,
             .kind = .recv,
             .buf = buf,
+            .fd = fd,
         });
 
         const sqe = try self.ring.recv(@intCast(fd), .{ .buffer = buf }, 0);
@@ -135,6 +139,7 @@ pub const Loop = struct {
             .ctx = ctx,
             .kind = .send,
             .buf = @constCast(buf),
+            .fd = fd,
         });
 
         const sqe = try self.ring.send(@intCast(fd), buf, 0);
@@ -154,6 +159,7 @@ pub const Loop = struct {
         try self.pending.put(id, .{
             .ctx = ctx,
             .kind = .close,
+            .fd = fd,
         });
 
         const sqe = try self.ring.close(@intCast(fd));
@@ -208,6 +214,22 @@ pub const Loop = struct {
         std.log.info("cancel: removing from pending map", .{});
         _ = self.pending.remove(id);
         std.log.info("cancel: done, pending count now={}", .{self.pending.count()});
+    }
+
+    pub fn cancelByFd(self: *Loop, fd: posix.socket_t) void {
+        var ids_to_cancel = std.ArrayList(usize){};
+        defer ids_to_cancel.deinit(self.allocator);
+
+        var it = self.pending.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.kind != .timer and entry.value_ptr.fd == fd) {
+                ids_to_cancel.append(self.allocator, entry.key_ptr.*) catch {};
+            }
+        }
+
+        for (ids_to_cancel.items) |id| {
+            self.cancel(id) catch {};
+        }
     }
 
     pub fn run(self: *Loop, mode: RunMode) !void {

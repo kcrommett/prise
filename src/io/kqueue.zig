@@ -327,6 +327,22 @@ pub const Loop = struct {
         std.log.debug("cancel: id={} removed={}", .{ id, removed });
     }
 
+    pub fn cancelByFd(self: *Loop, fd: posix.socket_t) void {
+        var ids_to_cancel = std.ArrayList(usize){};
+        defer ids_to_cancel.deinit(self.allocator);
+
+        var it = self.pending.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.kind != .timer and entry.value_ptr.fd == fd) {
+                ids_to_cancel.append(self.allocator, entry.key_ptr.*) catch {};
+            }
+        }
+
+        for (ids_to_cancel.items) |id| {
+            self.cancel(id) catch {};
+        }
+    }
+
     pub fn run(self: *Loop, mode: RunMode) !void {
         var events: [32]posix.Kevent = undefined;
 
