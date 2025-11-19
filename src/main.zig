@@ -89,7 +89,7 @@ pub fn main() !void {
 
     try loop.run(.until_done);
 
-    if (app.connection_refused) {
+    if (app.state.connection_refused) {
         // Stale socket - remove it and fork server
         std.log.info("Stale socket detected, removing and starting server", .{});
         posix.unlink(socket_path) catch {};
@@ -144,8 +144,8 @@ pub fn main() !void {
     }
 
     if (app.connected) {
-        if (app.response_received) {
-            if (app.pty_id) |pty_id| {
+        if (app.state.response_received) {
+            if (app.state.pty_id) |pty_id| {
                 std.log.info("Ready with PTY ID: {}", .{pty_id});
                 // Keep connection alive to see terminal output
                 std.log.info("Waiting for terminal output...", .{});
