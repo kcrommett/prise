@@ -27,6 +27,7 @@ const Pty = struct {
     dirty_signal_buf: [1]u8 = undefined,
     last_render_time: i64 = 0,
     render_timer: ?io.Task = null,
+    last_viewport: ?ghostty_vt.Pin = null,
 
     // Pointer to server for callbacks (opaque to avoid circular type dependency)
     server_ptr: *anyopaque = undefined,
@@ -153,19 +154,10 @@ const Pty = struct {
 };
 
 /// Convert ghostty style to Prise Style Attributes
-fn convertStyle(allocator: std.mem.Allocator, terminal: *ghostty_vt.Terminal, style_id: u16) redraw.UIEvent.Style.Attributes {
-    _ = allocator;
-
-    if (style_id == 0) {
-        // Default style - return empty attrs
-        return .{};
-    }
-
-    const screen = terminal.screens.active;
-    const page = &screen.cursor.page_pin.node.data;
-    const style = page.styles.get(page.memory, style_id);
-
-    var attrs: redraw.UIEvent.Style.Attributes = .{};
+fn getStyleAttributes(style: ghostty_vt.Style, selected: bool) redraw.UIEvent.Style.Attributes {
+    var attrs: redraw.UIEvent.Style.Attributes = .{
+        .selected = selected,
+    };
 
     // Convert foreground color
     switch (style.fg_color) {
@@ -195,11 +187,6 @@ fn convertStyle(allocator: std.mem.Allocator, terminal: *ghostty_vt.Terminal, st
     switch (style.underline_color) {
         .none => {},
         .palette => |idx| {
-            // We don't have an index field for underline color in the protocol yet,
-            // but we can lookup the palette color if we had access to the palette.
-            // If terminal.palette doesn't exist, we might be out of luck.
-            // For now, ignore palette underline colors or map them if possible.
-            // Let's assume we only support RGB for ul_color in protocol for now.
             _ = idx;
         },
         .rgb => |rgb| {
@@ -209,6 +196,7 @@ fn convertStyle(allocator: std.mem.Allocator, terminal: *ghostty_vt.Terminal, st
 
     // Convert flags
     attrs.bold = style.flags.bold;
+    attrs.dim = style.flags.faint;
     attrs.italic = style.flags.italic;
     attrs.reverse = style.flags.inverse;
     attrs.blink = style.flags.blink;
@@ -224,11 +212,6 @@ fn convertStyle(allocator: std.mem.Allocator, terminal: *ghostty_vt.Terminal, st
         .dashed => .dashed,
     };
 
-    // For backward compatibility with clients that only check 'underline' boolean
-    if (attrs.ul_style != .none) {
-        attrs.underline = true;
-    }
-
     return attrs;
 }
 
@@ -241,8 +224,9 @@ const ScreenState = struct {
     cursor_visible: bool,
     cursor_shape: redraw.UIEvent.CursorShape.Shape,
     rows_data: []DirtyRow,
-    styles: std.AutoHashMap(u32, redraw.UIEvent.Style.Attributes),
+    styles: []const redraw.UIEvent.Style,
     allocator: std.mem.Allocator,
+    viewport: ghostty_vt.Pin,
 
     pub const RenderMode = enum { full, incremental };
 
@@ -257,22 +241,65 @@ const ScreenState = struct {
         wide: bool, // true if this cell is wide (occupies 2 columns)
     };
 
-    fn init(allocator: std.mem.Allocator, terminal: *ghostty_vt.Terminal, mutex: *std.Thread.Mutex, mode: RenderMode) !ScreenState {
+    fn init(
+        allocator: std.mem.Allocator,
+        terminal: *ghostty_vt.Terminal,
+        mutex: *std.Thread.Mutex,
+        mode: RenderMode,
+        last_viewport: ?ghostty_vt.Pin,
+    ) !ScreenState {
         mutex.lock();
-        defer mutex.unlock();
+        errdefer mutex.unlock();
 
-        const screen = terminal.screens.active;
-        const page = &screen.cursor.page_pin.node.data;
+        // Snapshot the screen state so we can iterate without holding the lock
+        var screen = try terminal.screens.active.clone(allocator, .{ .viewport = .{} }, null);
 
-        const rows = page.size.rows;
-        const cols = page.size.cols;
+        // Get current viewport pin from live terminal
+        // We expect this to always return a valid pin
+        const current_viewport = terminal.screens.active.pages.pin(.{ .viewport = .{} }).?;
 
-        var styles = std.AutoHashMap(u32, redraw.UIEvent.Style.Attributes).init(allocator);
-        errdefer styles.deinit();
+        // Determine effective mode based on dirty flags and viewport changes
+        var effective_mode = mode;
 
-        var synthetic_cache = std.AutoHashMap(redraw.UIEvent.Style.Attributes, u32).init(allocator);
-        defer synthetic_cache.deinit();
-        var next_synthetic_id: u32 = 65536;
+        // Check terminal flags (palette, clear, etc)
+        if (!std.meta.eql(terminal.flags.dirty, .{})) effective_mode = .full;
+
+        // Check screen flags (selection, etc)
+        if (!std.meta.eql(terminal.screens.active.dirty, .{})) effective_mode = .full;
+
+        // Check if we scrolled (viewport changed)
+        if (last_viewport) |prev| {
+            if (!prev.eql(current_viewport)) effective_mode = .full;
+        } else {
+            effective_mode = .full;
+        }
+
+        // Clear all dirty flags
+        terminal.flags.dirty = .{};
+        terminal.screens.active.dirty = .{};
+        var it = terminal.screens.active.pages.pageIterator(.right_down, .{ .screen = .{} }, null);
+        while (it.next()) |chunk| {
+            var ds = chunk.node.data.dirtyBitSet();
+            ds.unsetAll();
+        }
+
+        mutex.unlock();
+        defer screen.deinit();
+
+        const rows = screen.pages.rows;
+        const cols = screen.pages.cols;
+
+        var styles_list = std.ArrayList(redraw.UIEvent.Style).empty;
+        errdefer styles_list.deinit(allocator);
+
+        // Map from attributes to style ID for deduplication within this frame
+        var styles_map = std.AutoHashMap(redraw.UIEvent.Style.Attributes, u32).init(allocator);
+        defer styles_map.deinit();
+
+        // Ensure default style is ID 0
+        try styles_map.put(.{}, 0);
+        try styles_list.append(allocator, .{ .id = 0, .attrs = .{} });
+        var next_style_id: u32 = 1;
 
         var rows_data = std.ArrayList(DirtyRow).empty;
         errdefer {
@@ -288,168 +315,122 @@ const ScreenState = struct {
         var utf8_buf: [4]u8 = undefined;
         var grapheme_buf: [32]u21 = undefined;
 
-        // Helper to capture a single row
-        const capture_row = struct {
-            fn call(
-                alloc: std.mem.Allocator,
-                p: anytype,
-                y: usize,
-                width: usize,
-                u_buf: *[4]u8,
-                g_buf: *[32]u21,
-                styles_map: *std.AutoHashMap(u32, redraw.UIEvent.Style.Attributes),
-                synth_cache: *std.AutoHashMap(redraw.UIEvent.Style.Attributes, u32),
-                next_id: *u32,
-            ) ![]CellData {
-                const row = p.getRow(y);
-                const row_cells = p.getCells(row);
-                var cells = try alloc.alloc(CellData, width);
-                errdefer alloc.free(cells);
+        // Iterate over the viewport
+        var row_it = screen.pages.rowIterator(.right_down, .{ .viewport = .{} }, null);
+        var y: usize = 0;
 
-                var x: usize = 0;
-                while (x < width) : (x += 1) {
-                    const cell = &row_cells[x];
+        while (row_it.next()) |row| : (y += 1) {
+            // If our viewport is smaller than the pages rows (can happen?), stop.
+            if (y >= rows) break;
 
-                    // Skip spacer tails (second half of wide chars)
-                    if (cell.wide == .spacer_tail) {
-                        cells[x] = .{
-                            .text = try alloc.dupe(u8, ""),
-                            .style_id = cell.style_id,
-                            .wide = false,
-                        };
-                        continue;
-                    }
+            // If incremental, skip non-dirty rows
+            if (effective_mode == .incremental and !row.isDirty()) continue;
 
-                    // Check for direct color cells
-                    var effective_style_id: u32 = cell.style_id;
-                    var is_direct_color = false;
+            var cells = try allocator.alloc(CellData, cols);
+            errdefer allocator.free(cells);
 
-                    if (cell.content_tag == .bg_color_rgb or cell.content_tag == .bg_color_palette) {
-                        var attrs = redraw.UIEvent.Style.Attributes{};
-                        if (cell.content_tag == .bg_color_rgb) {
-                            const rgb = cell.content.color_rgb;
-                            attrs.bg = (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | @as(u32, rgb.b);
-                        } else {
-                            attrs.bg_idx = cell.content.color_palette;
-                        }
+            const row_cells = row.cells(.all);
+            // If row_cells is smaller than cols, we pad with empty cells?
+            // Ghostty's row.cells(.all) should return the full width generally,
+            // but let's be safe and iterate up to cols.
 
-                        // Use synthetic ID
-                        if (synth_cache.get(attrs)) |id| {
-                            effective_style_id = id;
-                        } else {
-                            const id = next_id.*;
-                            next_id.* += 1;
-                            try synth_cache.put(attrs, id);
-                            try styles_map.put(id, attrs);
-                            effective_style_id = id;
-                        }
-                        is_direct_color = true;
-                    }
+            for (0..cols) |x| {
+                // Default cell if out of bounds
+                const cell = if (x < row_cells.len) &row_cells[x] else &ghostty_vt.Cell.init(0);
 
-                    // Extract text
-                    var text: []const u8 = "";
-
-                    if (is_direct_color) {
-                        text = try alloc.dupe(u8, " ");
-                    } else {
-                        var cluster: []const u21 = &[_]u21{};
-
-                        switch (cell.content_tag) {
-                            .codepoint => {
-                                if (cell.content.codepoint != 0) {
-                                    cluster = g_buf[0..1];
-                                    g_buf[0] = cell.content.codepoint;
-                                }
-                            },
-                            .codepoint_grapheme => {
-                                g_buf[0] = cell.content.codepoint;
-                                var len: usize = 1;
-                                if (p.lookupGrapheme(cell)) |extra| {
-                                    for (extra) |cp| {
-                                        if (len >= g_buf.len) break;
-                                        g_buf[len] = cp;
-                                        len += 1;
-                                    }
-                                }
-                                cluster = g_buf[0..len];
-                            },
-                            // Direct color tags handled above
-                            .bg_color_palette, .bg_color_rgb => {
-                                // Should have been handled by is_direct_color check but explicit case for switch completeness/fallthrough
-                                cluster = &[_]u21{' '};
-                            },
-                        }
-
-                        if (cluster.len > 0) {
-                            var utf8_list = std.ArrayList(u8).empty;
-                            defer utf8_list.deinit(alloc);
-                            for (cluster) |cp| {
-                                const len = std.unicode.utf8Encode(cp, u_buf) catch continue;
-                                try utf8_list.appendSlice(alloc, u_buf[0..len]);
-                            }
-                            text = try utf8_list.toOwnedSlice(alloc);
-                        } else {
-                            text = try alloc.dupe(u8, " ");
-                        }
-                    }
-
+                // Skip spacer tails
+                if (cell.wide == .spacer_tail) {
                     cells[x] = .{
-                        .text = text,
-                        .style_id = effective_style_id,
-                        .wide = cell.wide == .wide,
+                        .text = try allocator.dupe(u8, ""),
+                        .style_id = 0,
+                        .wide = false,
                     };
+                    continue;
                 }
-                return cells;
-            }
-        };
 
-        // Determine which rows to capture
-        // If full mode or screen dirty, capture all.
-        // Note: screen.dirty is a bitset of dirty flags (not rows)
-        var capture_all = (mode == .full);
+                // Check selection
+                const selected = if (screen.selection) |sel|
+                    sel.contains(&screen, .{ .node = row.node, .y = row.y, .x = @intCast(x) })
+                else
+                    false;
 
-        // Check if we can access screen.dirty
-        // Assuming screen.dirty is available and has typical bitset/struct methods.
-        // If screen has changed (resize, scroll, etc), we should redraw all.
-        if (!std.meta.eql(screen.dirty, .{})) {
-            capture_all = true;
-        }
+                var attrs = getStyleAttributes(row.style(cell), selected);
 
-        if (capture_all) {
-            for (0..rows) |y| {
-                const cells = try capture_row.call(allocator, page, y, cols, &utf8_buf, &grapheme_buf, &styles, &synthetic_cache, &next_synthetic_id);
-                try rows_data.append(allocator, .{ .y = y, .cells = cells });
-            }
+                // Handle direct color cells (bg_color_rgb / bg_color_palette)
+                var text: []const u8 = "";
+                var is_direct_color = false;
 
-            if (mode == .incremental) {
-                // Clear all dirty flags
-                screen.dirty = .{};
-                var ds = page.dirtyBitSet();
-                ds.unsetAll();
-            }
-        } else {
-            // Incremental update
-            var ds = page.dirtyBitSet();
-            var it = ds.iterator(.{});
-            while (it.next()) |y| {
-                if (y >= rows) continue;
-                const cells = try capture_row.call(allocator, page, y, cols, &utf8_buf, &grapheme_buf, &styles, &synthetic_cache, &next_synthetic_id);
-                try rows_data.append(allocator, .{ .y = y, .cells = cells });
-            }
-            ds.unsetAll();
-        }
-
-        // Populate styles (normal styles)
-        for (rows_data.items) |row| {
-            for (row.cells) |cell| {
-                if (cell.style_id != 0 and !styles.contains(cell.style_id)) {
-                    // Skip synthetic IDs (>= 65536) which are already populated
-                    if (cell.style_id >= 65536) continue;
-
-                    const attrs = convertStyle(allocator, terminal, @intCast(cell.style_id));
-                    try styles.put(cell.style_id, attrs);
+                if (cell.content_tag == .bg_color_rgb or cell.content_tag == .bg_color_palette) {
+                    if (cell.content_tag == .bg_color_rgb) {
+                        const rgb = cell.content.color_rgb;
+                        attrs.bg = (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | @as(u32, rgb.b);
+                    } else {
+                        attrs.bg_idx = cell.content.color_palette;
+                    }
+                    is_direct_color = true;
                 }
+
+                // Get or create style ID
+                const style_id = if (styles_map.get(attrs)) |id|
+                    id
+                else id: {
+                    const id = next_style_id;
+                    next_style_id += 1;
+                    try styles_map.put(attrs, id);
+                    try styles_list.append(allocator, .{ .id = id, .attrs = attrs });
+                    break :id id;
+                };
+
+                if (is_direct_color) {
+                    text = try allocator.dupe(u8, " ");
+                } else {
+                    var cluster: []const u21 = &[_]u21{};
+
+                    switch (cell.content_tag) {
+                        .codepoint => {
+                            if (cell.content.codepoint != 0) {
+                                cluster = grapheme_buf[0..1];
+                                grapheme_buf[0] = cell.content.codepoint;
+                            }
+                        },
+                        .codepoint_grapheme => {
+                            grapheme_buf[0] = cell.content.codepoint;
+                            var len: usize = 1;
+                            if (row.node.data.lookupGrapheme(cell)) |extra| {
+                                for (extra) |cp| {
+                                    if (len >= grapheme_buf.len) break;
+                                    grapheme_buf[len] = cp;
+                                    len += 1;
+                                }
+                            }
+                            cluster = grapheme_buf[0..len];
+                        },
+                        else => {
+                            cluster = &[_]u21{' '};
+                        },
+                    }
+
+                    if (cluster.len > 0) {
+                        var utf8_list = std.ArrayList(u8).empty;
+                        defer utf8_list.deinit(allocator);
+                        for (cluster) |cp| {
+                            const len = std.unicode.utf8Encode(cp, &utf8_buf) catch continue;
+                            try utf8_list.appendSlice(allocator, utf8_buf[0..len]);
+                        }
+                        text = try utf8_list.toOwnedSlice(allocator);
+                    } else {
+                        text = try allocator.dupe(u8, " ");
+                    }
+                }
+
+                cells[x] = .{
+                    .text = text,
+                    .style_id = style_id,
+                    .wide = cell.wide == .wide,
+                };
             }
+
+            try rows_data.append(allocator, .{ .y = y, .cells = cells });
         }
 
         const cursor_shape: redraw.UIEvent.CursorShape.Shape = switch (screen.cursor.cursor_style) {
@@ -466,13 +447,14 @@ const ScreenState = struct {
             .cursor_visible = terminal.modes.get(.cursor_visible),
             .cursor_shape = cursor_shape,
             .rows_data = try rows_data.toOwnedSlice(allocator),
-            .styles = styles,
+            .styles = try styles_list.toOwnedSlice(allocator),
             .allocator = allocator,
+            .viewport = current_viewport,
         };
     }
 
     fn deinit(self: *ScreenState) void {
-        self.styles.deinit();
+        self.allocator.free(self.styles);
         for (self.rows_data) |row| {
             for (row.cells) |cell| {
                 self.allocator.free(cell.text);
@@ -908,6 +890,7 @@ const Server = struct {
                 &pty_instance.terminal,
                 &pty_instance.terminal_mutex,
                 .full,
+                null,
             );
             defer state.deinit();
 
@@ -1140,9 +1123,8 @@ const Server = struct {
         }
 
         // Define all styles used in this frame
-        var it = state.styles.iterator();
-        while (it.next()) |entry| {
-            try builder.style(entry.key_ptr.*, entry.value_ptr.*);
+        for (state.styles) |style| {
+            try builder.style(style.id, style.attrs);
         }
 
         // Build write events for each dirty row
@@ -1248,11 +1230,15 @@ const Server = struct {
             &pty_instance.terminal,
             &pty_instance.terminal_mutex,
             .incremental,
+            pty_instance.last_viewport,
         ) catch |err| {
             std.log.err("Failed to copy screen state for session {}: {}", .{ pty_instance.id, err });
             return;
         };
         defer state.deinit();
+
+        // Update total rows
+        pty_instance.last_viewport = state.viewport;
 
         // Build and send redraw notifications
         self.sendRedraw(self.loop, pty_instance, &state, null, .incremental) catch |err| {
@@ -1728,9 +1714,9 @@ test "buildRedrawMessage" {
     };
     try rows_data.append(testing.allocator, .{ .y = 0, .cells = cells });
 
-    var styles = std.AutoHashMap(u32, redraw.UIEvent.Style.Attributes).init(testing.allocator);
-    defer styles.deinit();
-    try styles.put(1, .{ .fg = 0xFF0000 });
+    var styles_list = std.ArrayList(redraw.UIEvent.Style).empty;
+    defer styles_list.deinit(testing.allocator);
+    try styles_list.append(testing.allocator, .{ .id = 1, .attrs = .{ .fg = 0xFF0000 } });
 
     var state = ScreenState{
         .rows = 24,
@@ -1740,8 +1726,9 @@ test "buildRedrawMessage" {
         .cursor_visible = true,
         .cursor_shape = .block,
         .rows_data = rows_data.items,
-        .styles = styles,
+        .styles = styles_list.items,
         .allocator = testing.allocator,
+        .viewport = undefined,
     };
 
     const msg = try Server.buildRedrawMessage(testing.allocator, 1, &state, .full);

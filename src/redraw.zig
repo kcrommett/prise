@@ -73,6 +73,7 @@ pub const UIEvent = union(enum) {
             strikethrough: bool = false,
             ul_style: UnderlineStyle = .none,
             ul_color: ?u32 = null, // RGB
+            selected: bool = false,
         };
 
         pub const UnderlineStyle = enum(u8) {
@@ -320,6 +321,13 @@ pub const RedrawBuilder = struct {
         if (attrs.blink) {
             try items.append(self.allocator, .{
                 .key = msgpack.Value{ .string = try self.allocator.dupe(u8, "blink") },
+                .value = msgpack.Value{ .boolean = true },
+            });
+        }
+
+        if (attrs.selected) {
+            try items.append(self.allocator, .{
+                .key = msgpack.Value{ .string = try self.allocator.dupe(u8, "selected") },
                 .value = msgpack.Value{ .boolean = true },
             });
         }
