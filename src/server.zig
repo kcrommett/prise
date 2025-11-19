@@ -174,6 +174,7 @@ fn convertStyle(allocator: std.mem.Allocator, terminal: *ghostty_vt.Terminal, st
             attrs.fg_idx = @intCast(idx);
         },
         .rgb => |rgb| {
+            // Convert RGB struct to u32: 0xRRGGBB
             attrs.fg = (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | @as(u32, rgb.b);
         },
     }
@@ -185,28 +186,48 @@ fn convertStyle(allocator: std.mem.Allocator, terminal: *ghostty_vt.Terminal, st
             attrs.bg_idx = @intCast(idx);
         },
         .rgb => |rgb| {
+            // Convert RGB struct to u32: 0xRRGGBB
             attrs.bg = (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | @as(u32, rgb.b);
         },
     }
 
     // Convert underline color
-    // Note: Prise protocol doesn't support underline color yet, ignoring it
-    // (We could add it to Attributes if needed)
+    switch (style.underline_color) {
+        .none => {},
+        .palette => |idx| {
+            // We don't have an index field for underline color in the protocol yet,
+            // but we can lookup the palette color if we had access to the palette.
+            // If terminal.palette doesn't exist, we might be out of luck.
+            // For now, ignore palette underline colors or map them if possible.
+            // Let's assume we only support RGB for ul_color in protocol for now.
+            _ = idx;
+        },
+        .rgb => |rgb| {
+            attrs.ul_color = (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | @as(u32, rgb.b);
+        },
+    }
 
     // Convert flags
     attrs.bold = style.flags.bold;
     attrs.italic = style.flags.italic;
     attrs.reverse = style.flags.inverse;
     attrs.blink = style.flags.blink;
-    // strikethrough not supported in our protocol yet
-    // dim not supported in ghostty flags? or named differently
+    attrs.strikethrough = style.flags.strikethrough;
 
     // Handle underline variants
-    attrs.underline = switch (style.flags.underline) {
-        .none => false,
-        .single => true,
-        else => true, // double, curly, dotted, dashed all map to underline=true
+    attrs.ul_style = switch (style.flags.underline) {
+        .none => .none,
+        .single => .single,
+        .double => .double,
+        .curly => .curly,
+        .dotted => .dotted,
+        .dashed => .dashed,
     };
+
+    // For backward compatibility with clients that only check 'underline' boolean
+    if (attrs.ul_style != .none) {
+        attrs.underline = true;
+    }
 
     return attrs;
 }
@@ -217,6 +238,7 @@ const ScreenState = struct {
     cols: usize,
     cursor_x: usize,
     cursor_y: usize,
+    cursor_visible: bool,
     cursor_shape: redraw.UIEvent.CursorShape.Shape,
     rows_data: []DirtyRow,
     styles: std.AutoHashMap(u16, redraw.UIEvent.Style.Attributes),
@@ -285,7 +307,7 @@ const ScreenState = struct {
                     if (cell.wide == .spacer_tail) {
                         cells[x] = .{
                             .text = try alloc.dupe(u8, ""),
-                            .style_id = 0,
+                            .style_id = cell.style_id,
                             .wide = false,
                         };
                         continue;
@@ -398,6 +420,7 @@ const ScreenState = struct {
             .cols = cols,
             .cursor_x = screen.cursor.x,
             .cursor_y = screen.cursor.y,
+            .cursor_visible = terminal.modes.get(.cursor_visible),
             .cursor_shape = cursor_shape,
             .rows_data = try rows_data.toOwnedSlice(allocator),
             .styles = styles,
@@ -424,7 +447,9 @@ const Client = struct {
     send_buffer: ?[]u8 = null,
     send_queue: std.ArrayList([]u8),
     attached_sessions: std.ArrayList(usize),
-    seen_styles: std.AutoHashMap(u16, void),
+    // Map style ID to its last known definition hash/attributes to detect changes
+    // We store the Attributes struct directly.
+    // style_cache: std.AutoHashMap(u16, redraw.UIEvent.Style.Attributes),
 
     fn sendData(self: *Client, loop: *io.Loop, data: []const u8) !void {
         const buf = try self.server.allocator.dupe(u8, data);
@@ -556,7 +581,7 @@ const Client = struct {
                         std.log.debug("Received key_input: session={} notation='{s}'", .{ session_id, notation });
 
                         if (self.server.ptys.get(session_id)) |pty_instance| {
-                            // Parse Neovim key notation to ghostty key
+                            // Parse key notation to ghostty key
                             const key = key_parse.parseKeyNotation(notation) catch |err| {
                                 std.log.err("Failed to parse key notation '{s}': {}", .{ notation, err });
                                 return;
@@ -724,7 +749,32 @@ const Server = struct {
             };
 
             const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
-            const process = try pty.Process.spawn(self.allocator, size, &.{shell}, null);
+
+            // Prepare environment with TERM and COLORTERM
+            var env_map = try std.process.getEnvMap(self.allocator);
+            defer env_map.deinit();
+
+            try env_map.put("TERM", "xterm-256color");
+            try env_map.put("COLORTERM", "truecolor");
+
+            // Convert EnvMap to []const []const u8
+            var env_list = std.ArrayList([]const u8).empty;
+            defer env_list.deinit(self.allocator);
+
+            var it = env_map.iterator();
+            while (it.next()) |entry| {
+                const key_eq_val = try std.fmt.allocPrint(self.allocator, "{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
+                try env_list.append(self.allocator, key_eq_val);
+            }
+
+            // Manage lifetime of strings in env_list
+            defer {
+                for (env_list.items) |item| {
+                    self.allocator.free(item);
+                }
+            }
+
+            const process = try pty.Process.spawn(self.allocator, size, &.{shell}, @ptrCast(env_list.items));
 
             const session_id = self.next_session_id;
             self.next_session_id += 1;
@@ -935,7 +985,7 @@ const Server = struct {
                     .server = self,
                     .send_queue = std.ArrayList([]u8).empty,
                     .attached_sessions = std.ArrayList(usize).empty,
-                    .seen_styles = std.AutoHashMap(u16, void).init(self.allocator),
+                    // .style_cache = std.AutoHashMap(u16, redraw.UIEvent.Style.Attributes).init(self.allocator),
                 };
                 try self.clients.append(self.allocator, client);
                 std.log.debug("Total clients: {}", .{self.clients.items.len});
@@ -979,7 +1029,7 @@ const Server = struct {
         }
 
         client.attached_sessions.deinit(self.allocator);
-        client.seen_styles.deinit();
+        // client.style_cache.deinit();
 
         for (self.clients.items, 0..) |c, i| {
             if (c == client) {
@@ -1040,25 +1090,12 @@ const Server = struct {
                 try builder.resize(@intCast(pty_instance.id), @intCast(state.rows), @intCast(state.cols));
             }
 
-            // Track which styles we need to define
-            var styles_to_define = std.ArrayList(u16).empty;
-            defer styles_to_define.deinit(self.allocator);
-
-            // Scan all cells to find styles we haven't sent
-            for (state.rows_data) |row| {
-                for (row.cells) |cell| {
-                    if (cell.style_id != 0 and !client.seen_styles.contains(cell.style_id)) {
-                        try styles_to_define.append(self.allocator, cell.style_id);
-                        try client.seen_styles.put(cell.style_id, {});
-                    }
-                }
-            }
-
-            // Define new styles
-            for (styles_to_define.items) |style_id| {
-                if (state.styles.get(style_id)) |attrs| {
-                    try builder.style(style_id, attrs);
-                }
+            // Define all styles used in this frame
+            // We are stateless between frames, so we send definitions for everything we use.
+            // This handles page switches where style IDs might be reused with different values.
+            var it = state.styles.iterator();
+            while (it.next()) |entry| {
+                try builder.style(entry.key_ptr.*, entry.value_ptr.*);
             }
 
             // Build write events for each dirty row
@@ -1075,10 +1112,10 @@ const Server = struct {
                     const cell = &row.cells[x];
 
                     // Skip empty spacer tails
-                    if (cell.text.len == 0) {
-                        x += 1;
-                        continue;
-                    }
+                    // if (cell.text.len == 0) {
+                    //     x += 1;
+                    //     continue;
+                    // }
 
                     // Count consecutive cells with same style
                     var repeat: usize = 1;
@@ -1089,7 +1126,7 @@ const Server = struct {
                         const next_cell = &row.cells[next_x];
                         if (next_cell.style_id != cell.style_id) break;
                         if (!std.mem.eql(u8, next_cell.text, cell.text)) break;
-                        if (next_cell.text.len == 0) break; // Skip spacers
+                        // if (next_cell.text.len == 0) break; // Skip spacers
 
                         repeat += 1;
                         next_x += 1;
@@ -1118,7 +1155,9 @@ const Server = struct {
             }
 
             // Send cursor position
-            try builder.cursorPos(@intCast(pty_instance.id), @intCast(state.cursor_y), @intCast(state.cursor_x));
+            if (state.cursor_visible) {
+                try builder.cursorPos(@intCast(pty_instance.id), @intCast(state.cursor_y), @intCast(state.cursor_x));
+            }
 
             // Send cursor shape
             try builder.cursorShape(@intCast(pty_instance.id), state.cursor_shape);
@@ -1277,7 +1316,7 @@ pub fn startServer(allocator: std.mem.Allocator, socket_path: []const u8) !void 
         for (server.clients.items) |client| {
             posix.close(client.fd);
             client.attached_sessions.deinit(allocator);
-            client.seen_styles.deinit();
+            // client.style_cache.deinit();
             allocator.destroy(client);
         }
         server.clients.deinit(allocator);

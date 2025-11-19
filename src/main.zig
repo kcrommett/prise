@@ -163,4 +163,5 @@ test {
     _ = @import("pty.zig");
     _ = @import("client.zig");
     _ = @import("redraw.zig");
+    _ = @import("Surface.zig");
 }

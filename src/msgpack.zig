@@ -625,7 +625,7 @@ pub const Decoder = struct {
                     // Decode array into struct fields (positional)
                     const len = try self.readArrayLen();
                     // If tuple, we expect exact match or prefix?
-                    // Neovim often sends [type, msgid, method, params] which maps to a struct.
+                    // often sends [type, msgid, method, params] which maps to a struct.
                     // Let's assume if struct is a tuple, or just normal struct, we map fields in order.
 
                     var result: T = undefined;

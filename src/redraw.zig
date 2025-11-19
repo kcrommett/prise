@@ -70,6 +70,18 @@ pub const UIEvent = union(enum) {
             underline: bool = false,
             reverse: bool = false,
             blink: bool = false,
+            strikethrough: bool = false,
+            ul_style: UnderlineStyle = .none,
+            ul_color: ?u32 = null, // RGB
+        };
+
+        pub const UnderlineStyle = enum(u8) {
+            none = 0,
+            single = 1,
+            double = 2,
+            curly = 3,
+            dotted = 4,
+            dashed = 5,
         };
     };
 };
@@ -273,6 +285,27 @@ pub const RedrawBuilder = struct {
         if (attrs.underline) {
             try items.append(self.allocator, .{
                 .key = msgpack.Value{ .string = try self.allocator.dupe(u8, "underline") },
+                .value = msgpack.Value{ .boolean = true },
+            });
+        }
+
+        if (attrs.ul_style != .none) {
+            try items.append(self.allocator, .{
+                .key = msgpack.Value{ .string = try self.allocator.dupe(u8, "ul_style") },
+                .value = msgpack.Value{ .unsigned = @intFromEnum(attrs.ul_style) },
+            });
+        }
+
+        if (attrs.ul_color) |ulc| {
+            try items.append(self.allocator, .{
+                .key = msgpack.Value{ .string = try self.allocator.dupe(u8, "ul_color") },
+                .value = msgpack.Value{ .unsigned = ulc },
+            });
+        }
+
+        if (attrs.strikethrough) {
+            try items.append(self.allocator, .{
+                .key = msgpack.Value{ .string = try self.allocator.dupe(u8, "strikethrough") },
                 .value = msgpack.Value{ .boolean = true },
             });
         }

@@ -1,7 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 
-/// Convert a vaxis Key to Neovim key notation
+/// Convert a vaxis Key to key notation
 /// Returns a buffer containing the key notation (e.g., "<C-a>", "x", "<CR>")
 pub fn fromVaxisKey(key: vaxis.Key, buf: []u8) ![]const u8 {
     var stream = std.io.fixedBufferStream(buf);

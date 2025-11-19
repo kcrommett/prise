@@ -20,7 +20,7 @@ const Mods = packed struct(u16) {
 const lt_char = "<";
 const gt_char = ">";
 
-/// Parse Neovim key notation to ghostty KeyEvent
+/// Parse key notation to ghostty KeyEvent
 /// Examples: "<C-a>", "x", "<CR>", "<S-Tab>"
 pub fn parseKeyNotation(notation: []const u8) !KeyEvent {
     if (notation.len == 0) return error.EmptyKey;
