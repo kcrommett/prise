@@ -1728,7 +1728,7 @@ test "buildRedrawMessage" {
     };
     try rows_data.append(testing.allocator, .{ .y = 0, .cells = cells });
 
-    var styles = std.AutoHashMap(u16, redraw.UIEvent.Style.Attributes).init(testing.allocator);
+    var styles = std.AutoHashMap(u32, redraw.UIEvent.Style.Attributes).init(testing.allocator);
     defer styles.deinit();
     try styles.put(1, .{ .fg = 0xFF0000 });
 

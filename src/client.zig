@@ -141,6 +141,7 @@ pub const ServerAction = union(enum) {
     none,
     send_attach: i64,
     redraw: msgpack.Value,
+    attached,
 };
 
 pub const PipeAction = union(enum) {
@@ -168,7 +169,7 @@ pub const ClientLogic = struct {
                             } else if (!state.attached) {
                                 state.attached = true;
                                 std.log.info("Attached to session", .{});
-                                return .none;
+                                return .attached;
                             }
                         },
                         .unsigned => |u| {
@@ -178,7 +179,7 @@ pub const ClientLogic = struct {
                             } else if (!state.attached) {
                                 state.attached = true;
                                 std.log.info("Attached to session", .{});
-                                return .none;
+                                return .attached;
                             }
                         },
                         .string => |s| {
@@ -260,6 +261,7 @@ pub const ClientLogic = struct {
                 return try msgpack.encode(allocator, .{ "key", notation });
             },
             .winsize => |ws| {
+                std.log.debug("resize", .{});
                 return try msgpack.encode(allocator, .{ "resize", ws.rows, ws.cols });
             },
             else => return null,
@@ -414,6 +416,10 @@ pub const App = struct {
             std.log.err("Failed to start vaxis loop: {}", .{err});
             return;
         };
+        self.vx.queryTerminal(self.tty.writer(), 1 * std.time.ns_per_s) catch |err| {
+            std.log.err("Failed to query terminal: {}", .{err});
+            return;
+        };
         std.log.info("Vaxis loop started in TTY thread", .{});
 
         while (!self.state.should_quit) {
@@ -525,7 +531,7 @@ pub const App = struct {
                 }
             },
             .send_resize => |size| {
-                std.log.debug("Resize event: {}x{}", .{ size.cols, size.rows });
+                std.log.info("Resize event: {}x{}", .{ size.cols, size.rows });
 
                 // Resize vaxis
                 const winsize: vaxis.Winsize = .{
@@ -720,6 +726,22 @@ pub const App = struct {
                             };
                             std.log.debug("Render complete", .{});
                         },
+                        .attached => {
+                            std.log.info("Attached to session, checking for resize", .{});
+                            if (app.surface) |*surface| {
+                                std.log.info("Sending initial resize: {}x{}", .{ surface.rows, surface.cols });
+                                // Send resize_pty
+                                if (app.state.pty_id) |pty_id| {
+                                    const resize_msg = try msgpack.encode(app.allocator, .{
+                                        2, // notification
+                                        "resize_pty",
+                                        .{ pty_id, surface.rows, surface.cols },
+                                    });
+                                    defer app.allocator.free(resize_msg);
+                                    try app.sendDirect(resize_msg);
+                                }
+                            }
+                        },
                         .none => {},
                     }
 
@@ -907,7 +929,7 @@ test "ClientLogic - processServerMessage" {
 
         const action = try ClientLogic.processServerMessage(&state, msg);
         try testing.expect(state.attached);
-        try testing.expectEqual(std.meta.Tag(ServerAction).none, std.meta.activeTag(action));
+        try testing.expectEqual(std.meta.Tag(ServerAction).attached, std.meta.activeTag(action));
     }
 
     // Test Redraw Notification
