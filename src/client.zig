@@ -131,6 +131,8 @@ pub const ClientState = struct {
     attached: bool = false,
     should_quit: bool = false,
     connection_refused: bool = false,
+    pending_resize: ?struct { rows: u16, cols: u16, msgid: u32 } = null,
+    next_msgid: u32 = 1,
 
     pub fn init() ClientState {
         return .{};
@@ -142,6 +144,7 @@ pub const ServerAction = union(enum) {
     send_attach: i64,
     redraw: msgpack.Value,
     attached,
+    confirm_resize: struct { rows: u16, cols: u16 },
 };
 
 pub const PipeAction = union(enum) {
@@ -159,8 +162,22 @@ pub const ClientLogic = struct {
                 if (resp.err) |err_val| {
                     _ = err_val;
                     std.log.err("Error in response", .{});
+                    // If this was our pending resize, clear it
+                    if (state.pending_resize) |pending| {
+                        if (resp.msgid == pending.msgid) {
+                            state.pending_resize = null;
+                        }
+                    }
                     return .none;
                 } else {
+                    // Check if this is a response to our pending resize
+                    if (state.pending_resize) |pending| {
+                        if (resp.msgid == pending.msgid) {
+                            state.pending_resize = null;
+                            return ServerAction{ .confirm_resize = .{ .rows = pending.rows, .cols = pending.cols } };
+                        }
+                    }
+
                     switch (resp.result) {
                         .integer => |i| {
                             if (state.pty_id == null) {
@@ -533,40 +550,37 @@ pub const App = struct {
             .send_resize => |size| {
                 std.log.info("Resize event: {}x{}", .{ size.cols, size.rows });
 
-                // Resize vaxis
-                const winsize: vaxis.Winsize = .{
-                    .rows = size.rows,
-                    .cols = size.cols,
-                    .x_pixel = 0,
-                    .y_pixel = 0,
-                };
-                self.vx.resize(self.allocator, self.tty.writer(), winsize) catch |err| {
-                    std.log.err("Failed to resize vaxis: {}", .{err});
-                    return;
-                };
-
-                // Create or resize surface
-                if (self.surface) |*surface| {
-                    surface.resize(size.rows, size.cols) catch |err| {
-                        std.log.err("Failed to resize surface: {}", .{err});
-                    };
-                } else {
-                    self.surface = Surface.init(self.allocator, size.rows, size.cols) catch |err| {
-                        std.log.err("Failed to create surface: {}", .{err});
+                if (self.surface) |surface| {
+                    if (surface.rows == size.rows and surface.cols == size.cols) {
+                        std.log.info("Skipping resize, already at {}x{}", .{ size.cols, size.rows });
                         return;
-                    };
-                    std.log.info("Surface initialized: {}x{}", .{ size.cols, size.rows });
+                    }
                 }
 
-                // Send to server
+                // If we are attached, we send a request to the server and wait for the response
+                // before resizing our internal state. This avoids rendering empty screens.
                 if (self.state.attached and self.state.pty_id != null) {
+                    const msgid = self.state.next_msgid;
+                    self.state.next_msgid += 1;
+                    self.state.pending_resize = .{
+                        .rows = size.rows,
+                        .cols = size.cols,
+                        .msgid = msgid,
+                    };
+
+                    std.log.info("Sending resize_pty request id={} size={}x{}", .{ msgid, size.cols, size.rows });
+
                     const msg = try msgpack.encode(self.allocator, .{
-                        2, // notification
+                        0, // request
+                        msgid,
                         "resize_pty",
                         .{ self.state.pty_id.?, size.rows, size.cols },
                     });
                     defer self.allocator.free(msg);
                     try self.sendDirect(msg);
+                } else {
+                    // Not attached, resize immediately
+                    self.performResize(size.rows, size.cols);
                 }
             },
             .quit => {
@@ -589,6 +603,34 @@ pub const App = struct {
                 }
             },
             .none => {},
+        }
+    }
+
+    fn performResize(self: *App, rows: u16, cols: u16) void {
+        std.log.info("Performing resize to {}x{}", .{ cols, rows });
+        // Resize vaxis
+        const winsize: vaxis.Winsize = .{
+            .rows = rows,
+            .cols = cols,
+            .x_pixel = 0,
+            .y_pixel = 0,
+        };
+        self.vx.resize(self.allocator, self.tty.writer(), winsize) catch |err| {
+            std.log.err("Failed to resize vaxis: {}", .{err});
+            return;
+        };
+
+        // Create or resize surface
+        if (self.surface) |*surface| {
+            surface.resize(rows, cols) catch |err| {
+                std.log.err("Failed to resize surface: {}", .{err});
+            };
+        } else {
+            self.surface = Surface.init(self.allocator, rows, cols) catch |err| {
+                std.log.err("Failed to create surface: {}", .{err});
+                return;
+            };
+            std.log.info("Surface initialized: {}x{}", .{ cols, rows });
         }
     }
 
@@ -741,6 +783,10 @@ pub const App = struct {
                                     try app.sendDirect(resize_msg);
                                 }
                             }
+                        },
+                        .confirm_resize => |size| {
+                            std.log.info("Confirmed resize: {}x{}", .{ size.cols, size.rows });
+                            app.performResize(size.rows, size.cols);
                         },
                         .none => {},
                     }

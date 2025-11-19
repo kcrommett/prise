@@ -672,6 +672,11 @@ const Client = struct {
                         };
 
                         if (self.server.ptys.get(session_id)) |pty_instance| {
+                            if (pty_instance.terminal.rows == rows and pty_instance.terminal.cols == cols) {
+                                std.log.info("Skipping resize for session {}, already at {}x{}", .{ session_id, rows, cols });
+                                return;
+                            }
+
                             const size: pty.winsize = .{
                                 .ws_row = rows,
                                 .ws_col = cols,
@@ -925,6 +930,11 @@ const Server = struct {
             const pty_instance = self.ptys.get(session_id) orelse {
                 return msgpack.Value{ .string = try self.allocator.dupe(u8, "session not found") };
             };
+
+            if (pty_instance.terminal.rows == rows and pty_instance.terminal.cols == cols) {
+                std.log.info("Skipping resize for session {}, already at {}x{}", .{ session_id, rows, cols });
+                return msgpack.Value.nil;
+            }
 
             const size: pty.winsize = .{
                 .ws_row = rows,
