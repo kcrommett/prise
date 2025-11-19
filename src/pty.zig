@@ -59,6 +59,15 @@ pub const Process = struct {
             return error.SetFlagsFailed;
         };
 
+        const fl_flags = posix.fcntl(master_fd, posix.F.GETFL, 0) catch {
+            return error.SetFlagsFailed;
+        };
+        var fl_o: posix.O = @bitCast(@as(u32, @intCast(fl_flags)));
+        fl_o.NONBLOCK = true;
+        _ = posix.fcntl(master_fd, posix.F.SETFL, @as(u32, @bitCast(fl_o))) catch {
+            return error.SetFlagsFailed;
+        };
+
         var attrs: c.termios = undefined;
         if (c.tcgetattr(master_fd, &attrs) != 0) {
             return error.OpenptyFailed;
