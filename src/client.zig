@@ -310,7 +310,7 @@ pub const ClientLogic = struct {
         }
     }
 
-    fn vaxisKeyToString(allocator: std.mem.Allocator, key: vaxis.Key) ![]u8 {
+    pub fn vaxisKeyToString(allocator: std.mem.Allocator, key: vaxis.Key) ![]u8 {
         // Check for named keys by codepoint matching
         if (key.codepoint == vaxis.Key.enter) return try allocator.dupe(u8, "Enter");
         if (key.codepoint == vaxis.Key.tab) return try allocator.dupe(u8, "Tab");
@@ -352,39 +352,6 @@ pub const ClientLogic = struct {
     }
 };
 
-pub const PipeReader = struct {
-    buffer: std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator) PipeReader {
-        return .{
-            .buffer = .empty,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: *PipeReader) void {
-        self.buffer.deinit(self.allocator);
-    }
-
-    pub fn append(self: *PipeReader, data: []const u8) !void {
-        try self.buffer.appendSlice(self.allocator, data);
-    }
-
-    pub fn next(self: *PipeReader) !?msgpack.Value {
-        if (self.buffer.items.len < 4) return null;
-
-        const frame_len = std.mem.readInt(u32, self.buffer.items[0..4], .little);
-        if (self.buffer.items.len < 4 + frame_len) return null;
-
-        const payload = self.buffer.items[4 .. 4 + frame_len];
-        const value = try msgpack.decode(self.allocator, payload);
-
-        try self.buffer.replaceRange(self.allocator, 0, 4 + frame_len, &.{});
-        return value;
-    }
-};
-
 pub const App = struct {
     connected: bool = false,
     fd: posix.fd_t = undefined,
@@ -398,7 +365,6 @@ pub const App = struct {
     pipe_read_task: ?io.Task = null,
     vx: vaxis.Vaxis = undefined,
     tty: vaxis.Tty = undefined,
-    loop: vaxis.Loop(vaxis.Event) = undefined,
     tty_thread: ?std.Thread = null,
     io_loop: ?*io.Loop = null,
     tty_buffer: [4096]u8 = undefined,
@@ -410,7 +376,8 @@ pub const App = struct {
 
     pipe_read_fd: posix.fd_t = undefined,
     pipe_write_fd: posix.fd_t = undefined,
-    pipe_reader: PipeReader,
+    parser: vaxis.Parser = undefined,
+    pipe_buf: std.ArrayList(u8),
     pipe_recv_buffer: [4096]u8 = undefined,
 
     pub fn init(allocator: std.mem.Allocator) !App {
@@ -419,15 +386,15 @@ pub const App = struct {
             .vx = try vaxis.init(allocator, .{}),
             .tty = undefined,
             .tty_buffer = undefined,
-            .loop = undefined,
             .msg_buffer = .empty,
             .msg_arena = std.heap.ArenaAllocator.init(allocator),
-            .pipe_reader = PipeReader.init(allocator),
+            .pipe_buf = .empty,
         };
         app.tty = try vaxis.Tty.init(&app.tty_buffer);
-        app.loop = .{ .tty = &app.tty, .vaxis = &app.vx };
-        try app.loop.init();
-        std.log.info("Vaxis loop initialized", .{});
+        // parser doesn't need init? assuming default init is fine or init(&allocator)
+        app.parser = .{};
+
+        std.log.info("Vaxis initialized", .{});
 
         // Initialize Lua UI
         app.ui = try UI.init(allocator);
@@ -445,6 +412,10 @@ pub const App = struct {
     pub fn deinit(self: *App) void {
         self.ui.deinit();
         self.state.should_quit = true;
+
+        // Wake up TTY thread by sending a Device Status Report request.
+        // This causes the terminal to send a response, unblocking the read.
+        self.vx.deviceStatusReport(self.tty.writer()) catch {};
 
         // Cancel pending recv task
         if (self.recv_task) |*task| {
@@ -470,7 +441,7 @@ pub const App = struct {
         if (self.surface) |*surface| {
             surface.deinit();
         }
-        self.pipe_reader.deinit();
+        self.pipe_buf.deinit(self.allocator);
         self.msg_buffer.deinit(self.allocator);
         self.msg_arena.deinit();
         self.vx.deinit(self.allocator, self.tty.writer());
@@ -479,6 +450,7 @@ pub const App = struct {
 
     pub fn setup(self: *App, loop: *io.Loop) !void {
         self.io_loop = loop;
+        self.ui.setLoop(loop);
 
         try self.vx.enterAltScreen(self.tty.writer());
 
@@ -495,84 +467,39 @@ pub const App = struct {
         std.log.info("Spawning TTY thread...", .{});
         self.tty_thread = try std.Thread.spawn(.{}, ttyThreadFn, .{self});
         std.log.info("TTY thread spawned", .{});
+
+        // Send terminal queries to detect capabilities
+        try self.vx.queryTerminalSend(self.tty.writer());
+
+        // Manually trigger initial resize to connect
+        const ws = try vaxis.Tty.getWinsize(self.tty.fd);
+        try self.handleVaxisEvent(.{ .winsize = ws });
     }
 
     fn ttyThreadFn(self: *App) void {
         std.log.info("TTY thread started", .{});
 
-        // Start the vaxis loop (spawns TTY reader thread)
-        self.loop.start() catch |err| {
-            std.log.err("Failed to start vaxis loop: {}", .{err});
-            return;
-        };
-        // TODO: queryTerminal blocks for the full timeout waiting for unsupported capability
-        // responses. This adds ~20ms to startup. Consider skipping or doing asynchronously.
-        const start = std.time.milliTimestamp();
-        std.log.info("Starting queryTerminal...", .{});
-        self.vx.queryTerminal(self.tty.writer(), 20 * std.time.ns_per_ms) catch |err| {
-            std.log.err("Failed to query terminal: {}", .{err});
-            return;
-        };
-        const elapsed = std.time.milliTimestamp() - start;
-        std.log.info("Vaxis loop started in TTY thread (queryTerminal took {}ms)", .{elapsed});
-
-        // Send initial winsize event manually
-        const ws = vaxis.Tty.getWinsize(self.tty.fd) catch |err| {
-            std.log.err("Failed to get initial winsize: {}", .{err});
-            return;
-        };
-        std.log.info("Sending initial winsize: {}x{}", .{ ws.rows, ws.cols });
-        self.forwardEventToPipe(.{ .winsize = ws }) catch |err| {
-            std.log.err("Failed to forward initial winsize: {}", .{err});
-        };
-
+        var buf: [1024]u8 = undefined;
         while (!self.state.should_quit) {
-            std.log.debug("Waiting for next event...", .{});
-            const event = self.loop.nextEvent();
-            std.log.info("Received vaxis event: {s}", .{@tagName(event)});
-            self.forwardEventToPipe(event) catch |err| {
-                std.log.err("Error forwarding event: {}", .{err});
+            const n = posix.read(self.tty.fd, &buf) catch |err| {
+                std.log.err("TTY read failed: {}", .{err});
+                break;
+            };
+            if (n == 0) break; // EOF
+
+            // Forward to pipe
+            self.writePipeBytes(buf[0..n]) catch |err| {
+                std.log.err("Failed to write to pipe: {}", .{err});
+                break;
             };
         }
         std.log.info("TTY thread exiting", .{});
     }
 
-    fn forwardEventToPipe(self: *App, event: vaxis.Event) !void {
-        const msg = try ClientLogic.encodeEvent(self.allocator, event);
-        if (msg) |m| {
-            defer self.allocator.free(m);
-            try self.writePipeFrame(m);
-
-            // Check if it was a quit message, if so stop the loop
-            if (event == .key_press and event.key_press.codepoint == 'c' and event.key_press.mods.ctrl) {
-                std.log.info("Ctrl+C detected, sending quit and stopping vaxis loop", .{});
-                self.loop.stop();
-            }
-        }
-    }
-
-    fn writePipeFrame(self: *App, payload: []const u8) !void {
-        // Write length-prefixed frame: [u32_le length][payload]
-        var len_buf: [4]u8 = undefined;
-        std.mem.writeInt(u32, &len_buf, @intCast(payload.len), .little);
-
-        // Write length
+    fn writePipeBytes(self: *App, data: []const u8) !void {
         var index: usize = 0;
-        while (index < 4) {
-            const n = posix.write(self.pipe_write_fd, len_buf[index..]) catch |err| {
-                if (err == error.WouldBlock) {
-                    std.Thread.sleep(1 * std.time.ns_per_ms);
-                    continue;
-                }
-                return err;
-            };
-            index += n;
-        }
-
-        // Write payload
-        index = 0;
-        while (index < payload.len) {
-            const n = posix.write(self.pipe_write_fd, payload[index..]) catch |err| {
+        while (index < data.len) {
+            const n = posix.write(self.pipe_write_fd, data[index..]) catch |err| {
                 if (err == error.WouldBlock) {
                     std.Thread.sleep(1 * std.time.ns_per_ms);
                     continue;
@@ -594,13 +521,27 @@ pub const App = struct {
                 }
 
                 // Append to pipe buffer
-                try app.pipe_reader.append(app.pipe_recv_buffer[0..bytes_read]);
+                try app.pipe_buf.appendSlice(app.allocator, app.pipe_recv_buffer[0..bytes_read]);
 
-                // Process complete frames
-                while (try app.pipe_reader.next()) |value| {
-                    defer value.deinit(app.allocator);
-                    // Handle the message
-                    try app.handlePipeMessage(value);
+                // Parse events using vaxis parser
+                var i: usize = 0;
+                while (i < app.pipe_buf.items.len) {
+                    // Guessing parser API: parse(bytes, allocator) -> Result { n, event }
+                    const result = try app.parser.parse(app.pipe_buf.items[i..], app.allocator);
+                    if (result.n == 0) {
+                        // Incomplete sequence, wait for more data
+                        break;
+                    }
+                    i += result.n;
+
+                    if (result.event) |event| {
+                        try app.handleVaxisEvent(event);
+                    }
+                }
+
+                // Remove processed bytes
+                if (i > 0) {
+                    try app.pipe_buf.replaceRange(app.allocator, 0, i, &.{});
                 }
 
                 // Keep reading unless we're quitting
@@ -613,26 +554,100 @@ pub const App = struct {
             },
             .err => |err| {
                 std.log.err("Pipe recv failed: {}", .{err});
-                // Don't resubmit on error
             },
             else => unreachable,
         }
     }
 
-    fn handlePipeMessage(self: *App, value: msgpack.Value) !void {
-        const action = try ClientLogic.processPipeMessage(&self.state, value);
+    fn handleVaxisEvent(self: *App, event: vaxis.Event) !void {
+        std.log.debug("handleVaxisEvent: {s}", .{@tagName(event)});
+        switch (event) {
+            .key_press => |key| {
+                // Check for a cursor position response for our explicit width query. This will
+                // always be an F3 key with shift = true, and we must be looking for queries
+                if (key.codepoint == vaxis.Key.f3 and
+                    key.mods.shift and
+                    !self.vx.queries_done.load(.unordered))
+                {
+                    std.log.info("explicit width capability detected", .{});
+                    self.vx.caps.explicit_width = true;
+                    self.vx.caps.unicode = .unicode;
+                    self.vx.screen.width_method = .unicode;
+                    return;
+                }
+                // Check for a cursor position response for our scaled text query. This will
+                // always be an F3 key with alt = true, and we must be looking for queries
+                if (key.codepoint == vaxis.Key.f3 and
+                    key.mods.alt and
+                    !self.vx.queries_done.load(.unordered))
+                {
+                    std.log.info("scaled text capability detected", .{});
+                    self.vx.caps.scaled_text = true;
+                    return;
+                }
 
-        switch (action) {
-            .send_resize => |size| {
-                // First resize - initialize vaxis and surface, then connect
+                if (key.codepoint == 'c' and key.mods.ctrl) {
+                    std.log.info("Ctrl+C detected, quitting", .{});
+                    self.state.should_quit = true;
+                    if (self.connected) {
+                        posix.close(self.fd);
+                        self.connected = false;
+                    }
+                    if (self.recv_task) |*task| {
+                        if (self.io_loop) |loop| task.cancel(loop) catch {};
+                        self.recv_task = null;
+                    }
+                    return;
+                }
+
+                if (self.state.pty_id) |pty_id| {
+                    // Send key_input notification
+                    // We need the msgpack map for the key.
+                    // vaxisKeyToString is now pub.
+                    const key_str = try ClientLogic.vaxisKeyToString(self.allocator, key);
+                    defer self.allocator.free(key_str);
+
+                    var key_map_kv = try self.allocator.alloc(msgpack.Value.KeyValue, 5);
+                    key_map_kv[0] = .{ .key = .{ .string = "key" }, .value = .{ .string = key_str } };
+                    key_map_kv[1] = .{ .key = .{ .string = "shiftKey" }, .value = .{ .boolean = key.mods.shift } };
+                    key_map_kv[2] = .{ .key = .{ .string = "ctrlKey" }, .value = .{ .boolean = key.mods.ctrl } };
+                    key_map_kv[3] = .{ .key = .{ .string = "altKey" }, .value = .{ .boolean = key.mods.alt } };
+                    key_map_kv[4] = .{ .key = .{ .string = "metaKey" }, .value = .{ .boolean = key.mods.super } };
+
+                    const key_map_val = msgpack.Value{ .map = key_map_kv };
+
+                    var params = try self.allocator.alloc(msgpack.Value, 2);
+                    params[0] = .{ .unsigned = @intCast(pty_id) };
+                    params[1] = key_map_val;
+
+                    var arr = try self.allocator.alloc(msgpack.Value, 3);
+                    arr[0] = .{ .unsigned = 2 }; // notification
+                    arr[1] = .{ .string = "key_input" };
+                    arr[2] = .{ .array = params };
+
+                    const msg = try msgpack.encodeFromValue(self.allocator, .{ .array = arr });
+                    defer self.allocator.free(msg);
+
+                    // Clean up msgpack structures
+                    self.allocator.free(arr);
+                    self.allocator.free(params);
+                    self.allocator.free(key_map_kv);
+
+                    try self.sendDirect(msg);
+                }
+            },
+            .winsize => |ws| {
+                // Reuse performResize logic or call it
+                const rows = ws.rows;
+                const cols = ws.cols;
+
+                self.vx.state.in_band_resize = true;
+
+                // Copied from handlePipeMessage .send_resize logic
                 if (!self.first_resize_done) {
                     self.first_resize_done = true;
-                    std.log.info("First resize event: {}x{}, initializing and connecting", .{ size.cols, size.rows });
-
-                    // Resize vaxis
-                    self.performResize(size.rows, size.cols);
-
-                    // Now connect to server
+                    std.log.info("First resize event: {}x{}, initializing and connecting", .{ cols, rows });
+                    self.performResize(rows, cols);
                     if (self.io_loop) |loop| {
                         std.log.info("Connecting to server at {s}", .{self.socket_path});
                         _ = try connectUnixSocket(loop, self.socket_path, .{
@@ -643,82 +658,70 @@ pub const App = struct {
                     return;
                 }
 
-                // Subsequent resizes - check if we need to resize
-                std.log.info("Resize event: {}x{}", .{ size.cols, size.rows });
-
+                std.log.info("Resize event: {}x{}", .{ cols, rows });
                 if (self.surface) |surface| {
-                    if (surface.rows == size.rows and surface.cols == size.cols) {
-                        std.log.info("Skipping resize, already at {}x{}", .{ size.cols, size.rows });
+                    if (surface.rows == rows and surface.cols == cols) {
                         return;
                     }
                 }
 
-                // If we are attached, we send a request to the server and wait for the response
-                // before resizing our internal state. This avoids rendering empty screens.
                 if (self.state.attached and self.state.pty_id != null) {
                     const msgid = self.state.next_msgid;
                     self.state.next_msgid += 1;
                     self.state.pending_resize = .{
-                        .rows = size.rows,
-                        .cols = size.cols,
+                        .rows = rows,
+                        .cols = cols,
                         .msgid = msgid,
                     };
-
-                    std.log.info("Sending resize_pty request id={} size={}x{}", .{ msgid, size.cols, size.rows });
-
+                    // Send resize_pty
                     const msg = try msgpack.encode(self.allocator, .{
                         0, // request
                         msgid,
                         "resize_pty",
-                        .{ self.state.pty_id.?, size.rows, size.cols },
+                        .{ self.state.pty_id.?, rows, cols },
                     });
                     defer self.allocator.free(msg);
                     try self.sendDirect(msg);
                 } else {
-                    // Not attached yet, just resize locally
-                    self.performResize(size.rows, size.cols);
+                    self.performResize(rows, cols);
                 }
             },
-            .send_key => |key_map| {
-                if (self.state.pty_id) |pty_id| {
-                    // Build the notification array manually
-                    var arr = try self.allocator.alloc(msgpack.Value, 3);
-                    defer self.allocator.free(arr);
-                    arr[0] = .{ .unsigned = 2 }; // notification
-                    arr[1] = .{ .string = "key_input" };
-
-                    var params = try self.allocator.alloc(msgpack.Value, 2);
-                    defer self.allocator.free(params);
-                    params[0] = .{ .unsigned = @intCast(pty_id) };
-                    params[1] = key_map;
-
-                    arr[2] = .{ .array = params };
-
-                    const msg = try msgpack.encodeFromValue(self.allocator, .{ .array = arr });
-                    defer self.allocator.free(msg);
-                    try self.sendDirect(msg);
+            .cap_kitty_keyboard => {
+                std.log.info("kitty keyboard capability detected", .{});
+                self.vx.caps.kitty_keyboard = true;
+            },
+            .cap_kitty_graphics => {
+                if (!self.vx.caps.kitty_graphics) {
+                    std.log.info("kitty graphics capability detected", .{});
+                    self.vx.caps.kitty_graphics = true;
                 }
             },
-            .quit => {
-                std.log.info("Quit message received", .{});
-
-                // Cancel the recv task to unblock the event loop
-                if (self.recv_task) |*task| {
-                    if (self.io_loop) |loop| {
-                        task.cancel(loop) catch |err| {
-                            std.log.warn("Failed to cancel recv task in quit handler: {}", .{err});
-                        };
-                        self.recv_task = null;
-                    }
-                }
-
-                // Close socket to ensure recv completes
-                if (self.connected) {
-                    posix.close(self.fd);
-                    self.connected = false;
-                }
+            .cap_rgb => {
+                std.log.info("rgb capability detected", .{});
+                self.vx.caps.rgb = true;
             },
-            .none => {},
+            .cap_unicode => {
+                std.log.info("unicode capability detected", .{});
+                self.vx.caps.unicode = .unicode;
+                self.vx.screen.width_method = .unicode;
+            },
+            .cap_sgr_pixels => {
+                std.log.info("pixel mouse capability detected", .{});
+                self.vx.caps.sgr_pixels = true;
+            },
+            .cap_color_scheme_updates => {
+                std.log.info("color_scheme_updates capability detected", .{});
+                self.vx.caps.color_scheme_updates = true;
+            },
+            .cap_multi_cursor => {
+                std.log.info("multi cursor capability detected", .{});
+                self.vx.caps.multi_cursor = true;
+            },
+            .cap_da1 => {
+                self.vx.queries_done.store(true, .unordered);
+                try self.vx.enableDetectedFeatures(self.tty.writer());
+            },
+            else => {},
         }
     }
 
@@ -846,10 +849,11 @@ pub const App = struct {
     pub fn render(self: *App) !void {
         std.log.debug("render: starting render", .{});
 
-        const root_widget = self.ui.view() catch |err| {
+        var root_widget = self.ui.view() catch |err| {
             std.log.err("Failed to get view from UI: {}", .{err});
             return;
         };
+        defer root_widget.deinit(self.allocator);
 
         const win = self.vx.window();
         const screen = win.screen;
@@ -1061,55 +1065,6 @@ pub const App = struct {
         }
     }
 };
-
-test "PipeReader - partial and coalesced frames" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var reader = PipeReader.init(allocator);
-    defer reader.deinit();
-
-    // Create two encoded messages
-    const msg1 = try msgpack.encode(allocator, .{"first"});
-    defer allocator.free(msg1);
-
-    const msg2 = try msgpack.encode(allocator, .{"second"});
-    defer allocator.free(msg2);
-
-    var frame1 = std.ArrayList(u8).empty;
-    defer frame1.deinit(allocator);
-    try frame1.writer(allocator).writeInt(u32, @intCast(msg1.len), .little);
-    try frame1.appendSlice(allocator, msg1);
-
-    var frame2 = std.ArrayList(u8).empty;
-    defer frame2.deinit(allocator);
-    try frame2.writer(allocator).writeInt(u32, @intCast(msg2.len), .little);
-    try frame2.appendSlice(allocator, msg2);
-
-    // Test partial write
-    try reader.append(frame1.items[0..6]); // length + partial payload
-    try testing.expect((try reader.next()) == null);
-
-    // Complete first frame
-    try reader.append(frame1.items[6..]);
-    const val1 = (try reader.next()).?;
-    defer val1.deinit(allocator);
-    try testing.expectEqualStrings("first", val1.array[0].string);
-
-    // Test coalesced frames (two frames in one write)
-    try reader.append(frame1.items);
-    try reader.append(frame2.items);
-
-    const val2 = (try reader.next()).?;
-    defer val2.deinit(allocator);
-    try testing.expectEqualStrings("first", val2.array[0].string);
-
-    const val3 = (try reader.next()).?;
-    defer val3.deinit(allocator);
-    try testing.expectEqualStrings("second", val3.array[0].string);
-
-    try testing.expect((try reader.next()) == null);
-}
 
 test "ClientLogic - encodeEvent" {
     const testing = std.testing;

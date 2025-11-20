@@ -2,6 +2,7 @@ local prise = require("prise")
 
 local state = {
     pty = nil,
+    status_bg = "white",
 }
 
 local M = {}
@@ -9,6 +10,13 @@ local M = {}
 function M.update(event)
     if event.type == "pty_attach" then
         state.pty = event.data.pty
+    elseif event.type == "key_press" then
+        if event.key == "b" and event.ctrl then
+            state.status_bg = "magenta"
+            prise.set_timeout(500, function()
+                state.status_bg = "white"
+            end)
+        end
     end
 end
 
@@ -33,7 +41,7 @@ function M.view()
             main_view,
             prise.Text({
                 text = title,
-                style = { bg = "white", fg = "black" },
+                style = { bg = state.status_bg, fg = "black" },
             }),
         },
     })
