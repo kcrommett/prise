@@ -1,22 +1,41 @@
 const std = @import("std");
 const ziglua = @import("zlua");
 const vaxis = @import("vaxis");
+const Surface = @import("Surface.zig");
 
 pub const Event = union(enum) {
     vaxis: vaxis.Event,
-    pty_attach: u32,
+    pty_attach: struct {
+        id: u32,
+        surface: *Surface,
+    },
 };
 
 pub fn pushEvent(lua: *ziglua.Lua, event: Event) !void {
     lua.createTable(0, 2);
 
     switch (event) {
-        .pty_attach => |pty_id| {
+        .pty_attach => |info| {
             _ = lua.pushString("pty_attach");
             lua.setField(-2, "type");
 
             lua.createTable(0, 1);
-            lua.pushInteger(@intCast(pty_id));
+
+            try lua.newMetatable("PrisePty");
+            _ = lua.pushString("__index");
+            lua.pushFunction(ziglua.wrap(ptyIndex));
+            lua.setTable(-3);
+            lua.pop(1);
+
+            const pty = lua.newUserdata(PtyHandle, @sizeOf(PtyHandle));
+            pty.* = .{
+                .id = info.id,
+                .surface = info.surface,
+            };
+
+            _ = lua.getMetatableRegistry("PrisePty");
+            lua.setMetatable(-2);
+
             lua.setField(-2, "pty");
 
             lua.setField(-2, "data");
@@ -76,4 +95,56 @@ pub fn pushEvent(lua: *ziglua.Lua, event: Event) !void {
             },
         },
     }
+}
+
+const PtyHandle = struct {
+    id: u32,
+    surface: *Surface,
+};
+
+fn ptyIndex(lua: *ziglua.Lua) i32 {
+    const key = lua.toString(2) catch return 0;
+    if (std.mem.eql(u8, key, "title")) {
+        lua.pushFunction(ziglua.wrap(ptyTitle));
+        return 1;
+    }
+    if (std.mem.eql(u8, key, "id")) {
+        lua.pushFunction(ziglua.wrap(ptyId));
+        return 1;
+    }
+    return 0;
+}
+
+fn ptyTitle(lua: *ziglua.Lua) i32 {
+    const pty = lua.checkUserdata(PtyHandle, 1, "PrisePty");
+    const title = pty.surface.getTitle();
+    _ = lua.pushString(title);
+    return 1;
+}
+
+fn ptyId(lua: *ziglua.Lua) i32 {
+    const pty = lua.checkUserdata(PtyHandle, 1, "PrisePty");
+    lua.pushInteger(@intCast(pty.id));
+    return 1;
+}
+
+pub fn getPtyId(lua: *ziglua.Lua, index: i32) !u32 {
+    if (lua.typeOf(index) == .number) {
+        return @intCast(try lua.toInteger(index));
+    }
+
+    if (lua.isUserdata(index)) {
+        lua.getMetatable(index) catch return error.InvalidPty;
+
+        _ = lua.getMetatableRegistry("PrisePty");
+        const equal = lua.compare(-1, -2, .eq);
+        lua.pop(2);
+
+        if (equal) {
+            const pty = try lua.toUserdata(PtyHandle, index);
+            return pty.id;
+        }
+    }
+
+    return error.InvalidPty;
 }

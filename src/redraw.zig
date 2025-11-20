@@ -10,6 +10,7 @@ pub const UIEvent = union(enum) {
     cursor_pos: CursorPos,
     cursor_shape: CursorShape,
     style: Style,
+    title: Title,
     flush: void,
 
     /// ["resize", pty, rows, cols]
@@ -17,6 +18,12 @@ pub const UIEvent = union(enum) {
         pty: u32,
         rows: u16,
         cols: u16,
+    };
+
+    /// ["title", pty, title]
+    pub const Title = struct {
+        pty: u32,
+        title: []const u8,
     };
 
     /// ["write", pty, row, col, cells]
@@ -341,6 +348,24 @@ pub const RedrawBuilder = struct {
         const args = try arena.alloc(msgpack.Value, 2);
         args[0] = msgpack.Value{ .unsigned = id };
         args[1] = msgpack.Value{ .map = try items.toOwnedSlice(arena) };
+
+        const args_array = msgpack.Value{ .array = args };
+
+        const event_arr = try arena.alloc(msgpack.Value, 2);
+        event_arr[0] = event_name;
+        event_arr[1] = args_array;
+
+        try self.events.append(self.allocator, msgpack.Value{ .array = event_arr });
+    }
+
+    /// Add a title event
+    pub fn title(self: *RedrawBuilder, pty: u32, title_text: []const u8) !void {
+        const arena = self.arena.allocator();
+        const event_name = msgpack.Value{ .string = try arena.dupe(u8, "title") };
+
+        const args = try arena.alloc(msgpack.Value, 2);
+        args[0] = msgpack.Value{ .unsigned = pty };
+        args[1] = msgpack.Value{ .string = try arena.dupe(u8, title_text) };
 
         const args_array = msgpack.Value{ .array = args };
 

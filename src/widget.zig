@@ -1,6 +1,7 @@
 const std = @import("std");
 const ziglua = @import("zlua");
 const vaxis = @import("vaxis");
+const lua_event = @import("lua_event.zig");
 
 pub const BoxConstraints = struct {
     min_width: u16,
@@ -459,12 +460,10 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
 
         _ = lua.getField(index, "pty");
 
-        if (lua.typeOf(-1) != .number) {
+        const pty_id = lua_event.getPtyId(lua, -1) catch {
             lua.pop(1);
             return error.MissingPtyId;
-        }
-
-        const pty_id = try lua.toInteger(-1);
+        };
         lua.pop(1);
 
         return .{ .flex = actual_flex, .kind = .{ .surface = .{ .pty_id = @intCast(pty_id) } } };

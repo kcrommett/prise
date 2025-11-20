@@ -20,6 +20,10 @@ const Pty = struct {
     terminal: ghostty_vt.Terminal,
     allocator: std.mem.Allocator,
 
+    // Title of the terminal window
+    title: std.ArrayList(u8),
+    title_dirty: bool = false,
+
     // Synchronization for terminal access
     terminal_mutex: std.Thread.Mutex = .{},
     // Dirty signaling
@@ -46,6 +50,8 @@ const Pty = struct {
                 .rows = size.ws_row,
             }),
             .allocator = allocator,
+            .title = std.ArrayList(u8).empty,
+            .title_dirty = false,
             .pipe_fds = pipe_fds,
         };
         return instance;
@@ -75,6 +81,7 @@ const Pty = struct {
         posix.close(self.pipe_fds[1]);
         self.terminal.deinit(allocator);
         self.clients.deinit(allocator);
+        self.title.deinit(allocator);
         allocator.destroy(self);
     }
 
@@ -89,6 +96,15 @@ const Pty = struct {
                 return;
             }
         }
+    }
+
+    fn setTitle(self: *Pty, title: []const u8) !void {
+        // Mutex is already held by readThread when this is called via callback
+
+        // Update internal title
+        self.title.clearRetainingCapacity();
+        try self.title.appendSlice(self.allocator, title);
+        self.title_dirty = true;
     }
 
     // Removed broadcast - we'll send msgpack-RPC redraw notifications instead
@@ -110,6 +126,16 @@ const Pty = struct {
                 };
             }
         }.writeToPty);
+
+        // Set up title callback
+        handler.setTitleCallback(self, struct {
+            fn onTitle(ctx: ?*anyopaque, title: []const u8) !void {
+                const pty_inst: *Pty = @ptrCast(@alignCast(ctx));
+                pty_inst.setTitle(title) catch |err| {
+                    std.log.err("Failed to set title: {}", .{err});
+                };
+            }
+        }.onTitle);
 
         var stream = vt_handler.Stream.initAlloc(self.allocator, handler);
         defer stream.deinit();
@@ -227,6 +253,8 @@ const ScreenState = struct {
     styles: []const redraw.UIEvent.Style,
     viewport: ghostty_vt.Pin,
     arena: std.heap.ArenaAllocator,
+    title: []const u8,
+    title_changed: bool,
 
     pub const RenderMode = enum { full, incremental };
 
@@ -243,33 +271,41 @@ const ScreenState = struct {
 
     fn init(
         allocator: std.mem.Allocator,
-        terminal: *ghostty_vt.Terminal,
-        mutex: *std.Thread.Mutex,
+        pty_instance: *Pty,
         mode: RenderMode,
         last_viewport: ?ghostty_vt.Pin,
     ) !ScreenState {
         const t0 = std.time.nanoTimestamp();
 
-        mutex.lock();
-        errdefer mutex.unlock();
+        pty_instance.terminal_mutex.lock();
+        errdefer pty_instance.terminal_mutex.unlock();
 
         // Snapshot the screen state so we can iterate without holding the lock
-        var screen = try terminal.screens.active.clone(allocator, .{ .viewport = .{} }, null);
+        var screen = try pty_instance.terminal.screens.active.clone(allocator, .{ .viewport = .{} }, null);
+
+        // Copy title info
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        const arena_allocator = arena.allocator();
+
+        const title = try arena_allocator.dupe(u8, pty_instance.title.items);
+        const title_changed = pty_instance.title_dirty;
+        pty_instance.title_dirty = false;
 
         const t1 = std.time.nanoTimestamp();
 
         // Get current viewport pin from live terminal
         // We expect this to always return a valid pin
-        const current_viewport = terminal.screens.active.pages.pin(.{ .viewport = .{} }).?;
+        const current_viewport = pty_instance.terminal.screens.active.pages.pin(.{ .viewport = .{} }).?;
 
         // Determine effective mode based on dirty flags and viewport changes
         var effective_mode = mode;
 
         // Check terminal flags (palette, clear, etc)
-        if (!std.meta.eql(terminal.flags.dirty, .{})) effective_mode = .full;
+        if (!std.meta.eql(pty_instance.terminal.flags.dirty, .{})) effective_mode = .full;
 
         // Check screen flags (selection, etc)
-        if (!std.meta.eql(terminal.screens.active.dirty, .{})) effective_mode = .full;
+        if (!std.meta.eql(pty_instance.terminal.screens.active.dirty, .{})) effective_mode = .full;
 
         // Check if we scrolled (viewport changed)
         if (last_viewport) |prev| {
@@ -279,25 +315,21 @@ const ScreenState = struct {
         }
 
         // Clear all dirty flags
-        terminal.flags.dirty = .{};
-        terminal.screens.active.dirty = .{};
-        var it = terminal.screens.active.pages.pageIterator(.right_down, .{ .screen = .{} }, null);
+        pty_instance.terminal.flags.dirty = .{};
+        pty_instance.terminal.screens.active.dirty = .{};
+        var it = pty_instance.terminal.screens.active.pages.pageIterator(.right_down, .{ .screen = .{} }, null);
         while (it.next()) |chunk| {
             var ds = chunk.node.data.dirtyBitSet();
             ds.unsetAll();
         }
 
-        mutex.unlock();
+        pty_instance.terminal_mutex.unlock();
 
         const t2 = std.time.nanoTimestamp();
         defer screen.deinit();
 
         const rows = screen.pages.rows;
         const cols = screen.pages.cols;
-
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        errdefer arena.deinit();
-        const arena_allocator = arena.allocator();
 
         var styles_list = std.ArrayList(redraw.UIEvent.Style).empty;
         // no errdefer needed as arena handles cleanup
@@ -513,12 +545,14 @@ const ScreenState = struct {
             .cols = cols,
             .cursor_x = screen.cursor.x,
             .cursor_y = screen.cursor.y,
-            .cursor_visible = terminal.modes.get(.cursor_visible),
+            .cursor_visible = pty_instance.terminal.modes.get(.cursor_visible),
             .cursor_shape = cursor_shape,
             .rows_data = try rows_data.toOwnedSlice(arena_allocator),
             .styles = try styles_list.toOwnedSlice(arena_allocator),
             .viewport = current_viewport,
             .arena = arena,
+            .title = title,
+            .title_changed = title_changed,
         };
     }
 
@@ -946,7 +980,7 @@ const Server = struct {
 
                 // Send initial redraw
                 std.log.info("Sending initial redraw for session {}", .{session_id});
-                var state = try ScreenState.init(self.allocator, &pty_instance.terminal, &pty_instance.terminal_mutex, .full, pty_instance.last_viewport);
+                var state = try ScreenState.init(self.allocator, pty_instance, .full, pty_instance.last_viewport);
                 defer state.deinit();
                 std.log.info("ScreenState: rows={} cols={}", .{ state.rows, state.cols });
                 try self.sendRedraw(self.loop, pty_instance, &state, client, .full);
@@ -976,8 +1010,7 @@ const Server = struct {
             // Send full redraw to the newly attached client
             var state = try ScreenState.init(
                 self.allocator,
-                &pty_instance.terminal,
-                &pty_instance.terminal_mutex,
+                pty_instance,
                 .full,
                 null,
             );
@@ -1216,6 +1249,10 @@ const Server = struct {
             try builder.resize(@intCast(pty_id), @intCast(state.rows), @intCast(state.cols));
         }
 
+        if (mode == .full or state.title_changed) {
+            try builder.title(@intCast(pty_id), state.title);
+        }
+
         // Define all styles used in this frame
         for (state.styles) |style| {
             try builder.style(style.id, style.attrs);
@@ -1323,8 +1360,7 @@ const Server = struct {
         // Copy screen state under mutex
         var state = ScreenState.init(
             self.allocator,
-            &pty_instance.terminal,
-            &pty_instance.terminal_mutex,
+            pty_instance,
             .incremental,
             pty_instance.last_viewport,
         ) catch |err| {
@@ -1839,6 +1875,8 @@ test "buildRedrawMessage" {
         .styles = styles_list.items,
         .viewport = undefined,
         .arena = undefined,
+        .title = "Test Title",
+        .title_changed = true,
     };
 
     const msg = try Server.buildRedrawMessage(testing.allocator, 1, &state, .full);
@@ -1851,10 +1889,15 @@ test "ScreenState style optimization" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var terminal = try ghostty_vt.Terminal.init(allocator, .{ .cols = 10, .rows = 2 });
-    defer terminal.deinit(allocator);
+    var pty_inst: Pty = undefined;
+    pty_inst.terminal = try ghostty_vt.Terminal.init(allocator, .{ .cols = 10, .rows = 2 });
+    defer pty_inst.terminal.deinit(allocator);
+    pty_inst.terminal_mutex = std.Thread.Mutex{};
+    pty_inst.title = std.ArrayList(u8).empty;
+    defer pty_inst.title.deinit(allocator);
+    pty_inst.title_dirty = false;
 
-    const handler = vt_handler.Handler.init(&terminal);
+    const handler = vt_handler.Handler.init(&pty_inst.terminal);
     var stream = vt_handler.Stream.initAlloc(allocator, handler);
     defer stream.deinit();
 
@@ -1876,8 +1919,7 @@ test "ScreenState style optimization" {
     try stream.nextSlice("\x1b[31m");
     try stream.nextSlice(&[_]u8{'D'});
 
-    var mutex = std.Thread.Mutex{};
-    var state = try ScreenState.init(allocator, &terminal, &mutex, .full, null);
+    var state = try ScreenState.init(allocator, &pty_inst, .full, null);
     defer state.deinit();
 
     // Find row 0 and 1

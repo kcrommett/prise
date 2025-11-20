@@ -867,6 +867,9 @@ pub const App = struct {
         try self.renderWidget(w, win);
 
         std.log.debug("render: calling vx.render()", .{});
+        if (self.surface) |*surface| {
+            self.vx.setTitle(self.tty.writer(), surface.getTitle()) catch {};
+        }
         try self.vx.render(self.tty.writer());
         std.log.debug("render: flushing tty", .{});
         try self.tty.tty_writer.interface.flush();
@@ -993,11 +996,6 @@ pub const App = struct {
                             std.log.info("Attached to session, checking for resize", .{});
 
                             if (app.state.pty_id) |pty_id| {
-                                // Send pty_attach event to Lua UI
-                                app.ui.update(.{ .pty_attach = @intCast(pty_id) }) catch |err| {
-                                    std.log.err("Failed to update UI with pty_attach: {}", .{err});
-                                };
-
                                 // Ensure surface exists
                                 if (app.surface == null) {
                                     const ws = try vaxis.Tty.getWinsize(app.tty.fd);
@@ -1009,6 +1007,11 @@ pub const App = struct {
                                 }
 
                                 if (app.surface) |*surface| {
+                                    // Send pty_attach event to Lua UI
+                                    app.ui.update(.{ .pty_attach = .{ .id = @intCast(pty_id), .surface = surface } }) catch |err| {
+                                        std.log.err("Failed to update UI with pty_attach: {}", .{err});
+                                    };
+
                                     std.log.info("Sending initial resize: {}x{}", .{ surface.rows, surface.cols });
                                     const resize_msg = try msgpack.encode(app.allocator, .{
                                         2, // notification

@@ -12,6 +12,7 @@ cols: u16,
 cursor_shape: redraw.UIEvent.CursorShape.Shape = .block,
 dirty: bool = false,
 hl_attrs: std.AutoHashMap(u32, vaxis.Style),
+title: std.ArrayList(u8),
 
 const redraw = @import("redraw.zig");
 
@@ -34,6 +35,7 @@ pub fn init(allocator: std.mem.Allocator, rows: u16, cols: u16) !Surface {
         .rows = rows,
         .cols = cols,
         .hl_attrs = std.AutoHashMap(u32, vaxis.Style).init(allocator),
+        .title = std.ArrayList(u8).empty,
     };
 }
 
@@ -43,6 +45,7 @@ pub fn deinit(self: *Surface) void {
     self.back.deinit(self.allocator);
     self.allocator.destroy(self.back);
     self.hl_attrs.deinit();
+    self.title.deinit(self.allocator);
 }
 
 pub fn resize(self: *Surface, rows: u16, cols: u16) !void {
@@ -127,6 +130,15 @@ pub fn applyRedraw(self: *Surface, params: msgpack.Value) !void {
             };
 
             self.cursor_shape = @enumFromInt(shape_int);
+            self.dirty = true;
+        } else if (std.mem.eql(u8, event_name.string, "title")) {
+            if (event_params.array.len < 2) continue;
+
+            // args: [pty, title]
+            const title_text = if (event_params.array[1] == .string) event_params.array[1].string else "";
+
+            self.title.clearRetainingCapacity();
+            try self.title.appendSlice(self.allocator, title_text);
             self.dirty = true;
         } else if (std.mem.eql(u8, event_name.string, "write")) {
             if (event_params.array.len < 4) continue;
@@ -360,6 +372,10 @@ pub fn render(self: *Surface, win: vaxis.Window) void {
     }
 
     self.dirty = false;
+}
+
+pub fn getTitle(self: *Surface) []const u8 {
+    return self.title.items;
 }
 
 test "Surface - applyRedraw style handling" {
