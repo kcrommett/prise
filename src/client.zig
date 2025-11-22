@@ -491,8 +491,12 @@ pub const App = struct {
         self.pipe_buf.deinit(self.allocator);
         self.msg_buffer.deinit(self.allocator);
         self.msg_arena.deinit();
+        self.state.deinit();
         self.vx.deinit(self.allocator, self.tty.writer());
         self.tty.deinit();
+
+        posix.close(self.pipe_read_fd);
+        posix.close(self.pipe_write_fd);
     }
 
     pub fn setup(self: *App, loop: *io.Loop) !void {
@@ -863,7 +867,7 @@ pub const App = struct {
                             std.log.err("Failed to send resize: {}", .{err});
                         };
                     }
-                    surface.render(win);
+                    surface.render(win, w.show_cursor);
                 }
             },
             .text => |text| {
@@ -972,13 +976,16 @@ pub const App = struct {
     pub fn render(self: *App) !void {
         std.log.debug("render: starting render", .{});
 
+        const win = self.vx.window();
+        win.hideCursor();
+        win.clear();
+
         var root_widget = self.ui.view() catch |err| {
             std.log.err("Failed to get view from UI: {}", .{err});
             return;
         };
         defer root_widget.deinit(self.allocator);
 
-        const win = self.vx.window();
         const screen = win.screen;
 
         const constraints = widget.BoxConstraints{
@@ -992,6 +999,9 @@ pub const App = struct {
         _ = w.layout(constraints);
 
         try self.renderWidget(w, win);
+
+        // Log cursor state after render
+        std.log.info("App.render: cursor_vis={}", .{screen.cursor_vis});
 
         std.log.debug("render: calling vx.render()", .{});
         if (self.state.pty_id) |pid_i64| {

@@ -5,6 +5,7 @@ function M.Terminal(opts)
         type = "terminal",
         pty = opts.pty,
         flex = opts.flex,
+        show_cursor = opts.show_cursor,
     }
 end
 
@@ -35,6 +36,7 @@ function M.Text(opts)
     return {
         type = "text",
         content = opts.content or {},
+        show_cursor = opts.show_cursor,
     }
 end
 
@@ -52,6 +54,7 @@ function M.Column(opts)
         children = opts.children or opts,
         flex = opts.flex,
         cross_axis_align = opts.cross_axis_align,
+        show_cursor = opts.show_cursor,
     }
 end
 
@@ -69,6 +72,7 @@ function M.Row(opts)
         children = opts.children or opts,
         flex = opts.flex,
         cross_axis_align = opts.cross_axis_align,
+        show_cursor = opts.show_cursor,
     }
 end
 

@@ -85,7 +85,8 @@ function M.view()
     local terminal_views = {}
 
     for i, pty in ipairs(state.ptys) do
-        table.insert(terminal_views, prise.Terminal({ pty = pty, flex = 1 }))
+        local is_focused = i == state.focused_index
+        table.insert(terminal_views, prise.Terminal({ pty = pty, flex = 1, show_cursor = is_focused }))
     end
 
     if #terminal_views == 0 then

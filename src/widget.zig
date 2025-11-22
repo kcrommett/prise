@@ -21,6 +21,7 @@ pub const Widget = struct {
     width: u16 = 0,
     height: u16 = 0,
     flex: u8 = 0,
+    show_cursor: bool = false,
     kind: WidgetKind,
 
     pub fn deinit(self: *Widget, allocator: std.mem.Allocator) void {
@@ -560,6 +561,13 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
     }
     lua.pop(1);
 
+    var show_cursor: bool = false;
+    _ = lua.getField(index, "show_cursor");
+    if (lua.typeOf(-1) == .boolean) {
+        show_cursor = lua.toBoolean(-1);
+    }
+    lua.pop(1);
+
     if (std.mem.eql(u8, widget_type, "terminal")) {
         // Surface default flex is 1 if not specified?
         // User said: "a surface should probably be flex = 1 by default"
@@ -593,7 +601,7 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         };
         lua.pop(1);
 
-        return .{ .flex = actual_flex, .kind = .{ .surface = .{ .pty_id = @intCast(pty_id) } } };
+        return .{ .flex = actual_flex, .show_cursor = show_cursor, .kind = .{ .surface = .{ .pty_id = @intCast(pty_id) } } };
     } else if (std.mem.eql(u8, widget_type, "column")) {
         _ = lua.getField(index, "children");
         if (lua.typeOf(-1) != .table) {
@@ -628,7 +636,7 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         }
         lua.pop(1);
 
-        return .{ .flex = flex, .kind = .{ .column = .{
+        return .{ .flex = flex, .show_cursor = show_cursor, .kind = .{ .column = .{
             .children = try children.toOwnedSlice(allocator),
             .cross_axis_align = cross_align,
         } } };
@@ -666,7 +674,7 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         }
         lua.pop(1);
 
-        return .{ .flex = flex, .kind = .{ .row = .{
+        return .{ .flex = flex, .show_cursor = show_cursor, .kind = .{ .row = .{
             .children = try children.toOwnedSlice(allocator),
             .cross_axis_align = cross_align,
         } } };
@@ -737,7 +745,7 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         }
         lua.pop(1);
 
-        return .{ .flex = flex, .kind = .{ .text = .{
+        return .{ .flex = flex, .show_cursor = show_cursor, .kind = .{ .text = .{
             .spans = try spans.toOwnedSlice(allocator),
             .wrap = wrap,
             .@"align" = @"align",
