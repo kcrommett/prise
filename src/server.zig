@@ -33,6 +33,7 @@ const Pty = struct {
     terminal_mutex: std.Thread.Mutex = .{},
     // Dirty signaling
     pipe_fds: [2]posix.fd_t,
+    exit_pipe_fds: [2]posix.fd_t,
     dirty_signal_buf: [1]u8 = undefined,
     last_render_time: i64 = 0,
     render_timer: ?io.Task = null,
@@ -44,6 +45,7 @@ const Pty = struct {
     fn init(allocator: std.mem.Allocator, id: usize, process_instance: pty.Process, size: pty.winsize) !*Pty {
         const instance = try allocator.create(Pty);
         const pipe_fds = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
+        const exit_pipe_fds = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
 
         instance.* = .{
             .id = id,
@@ -58,6 +60,7 @@ const Pty = struct {
             .title = std.ArrayList(u8).empty,
             .title_dirty = false,
             .pipe_fds = pipe_fds,
+            .exit_pipe_fds = exit_pipe_fds,
             .render_state = .empty,
         };
         return instance;
@@ -65,6 +68,8 @@ const Pty = struct {
 
     fn deinit(self: *Pty, allocator: std.mem.Allocator, loop: *io.Loop) void {
         self.running.store(false, .seq_cst);
+        // Signal read thread to exit
+        _ = posix.write(self.exit_pipe_fds[1], "q") catch {};
 
         // Kill the PTY process
         _ = posix.kill(self.process.pid, posix.SIG.HUP) catch {};
@@ -85,6 +90,8 @@ const Pty = struct {
 
         posix.close(self.pipe_fds[0]);
         posix.close(self.pipe_fds[1]);
+        posix.close(self.exit_pipe_fds[0]);
+        posix.close(self.exit_pipe_fds[1]);
         self.terminal.deinit(allocator);
         self.render_state.deinit(allocator);
         self.clients.deinit(allocator);
@@ -147,36 +154,53 @@ const Pty = struct {
         var stream = vt_handler.Stream.initAlloc(self.allocator, handler);
         defer stream.deinit();
 
+        var poll_fds = [_]posix.pollfd{
+            .{ .fd = self.process.master, .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = self.exit_pipe_fds[0], .events = posix.POLL.IN, .revents = 0 },
+        };
+
         while (self.running.load(.seq_cst)) {
-            const n = posix.read(self.process.master, &buffer) catch |err| {
-                if (err == error.WouldBlock) {
-                    std.Thread.sleep(10 * std.time.ns_per_ms);
-                    continue;
+            // Tight loop: drain PTY buffer
+            while (true) {
+                const n = posix.read(self.process.master, &buffer) catch |err| {
+                    if (err == error.WouldBlock) break; // Buffer empty, time to poll
+                    std.log.err("PTY read error: {}", .{err});
+                    self.running.store(false, .seq_cst);
+                    break;
+                };
+                if (n == 0) {
+                    self.running.store(false, .seq_cst);
+                    break;
                 }
-                std.log.err("PTY read error: {}", .{err});
+
+                // Lock mutex and update terminal state
+                self.terminal_mutex.lock();
+                // Parse the data through ghostty-vt to update terminal state
+                stream.nextSlice(buffer[0..n]) catch |err| {
+                    std.log.err("Failed to parse VT sequences: {}", .{err});
+                };
+                self.terminal_mutex.unlock();
+
+                // Notify main thread by writing to pipe
+                // Ignore EAGAIN (pipe full means already dirty)
+                if (!self.terminal.modes.get(.synchronized_output)) {
+                    _ = posix.write(self.pipe_fds[1], "x") catch |err| {
+                        if (err != error.WouldBlock) {
+                            std.log.err("Failed to signal dirty: {}", .{err});
+                        }
+                    };
+                }
+            }
+
+            if (!self.running.load(.seq_cst)) break;
+
+            // Poll for more data or exit signal
+            _ = posix.poll(&poll_fds, -1) catch |err| {
+                std.log.err("Poll error: {}", .{err});
                 break;
             };
-            if (n == 0) break;
 
-            // Lock mutex and update terminal state
-            self.terminal_mutex.lock();
-            defer self.terminal_mutex.unlock();
-
-            // Parse the data through ghostty-vt to update terminal state
-            stream.nextSlice(buffer[0..n]) catch |err| {
-                std.log.err("Failed to parse VT sequences: {}", .{err});
-                continue;
-            };
-
-            // Notify main thread by writing to pipe
-            // Ignore EAGAIN (pipe full means already dirty)
-            if (!self.terminal.modes.get(.synchronized_output)) {
-                _ = posix.write(self.pipe_fds[1], "x") catch |err| {
-                    if (err != error.WouldBlock) {
-                        std.log.err("Failed to signal dirty: {}", .{err});
-                    }
-                };
-            }
+            if (poll_fds[1].revents & posix.POLL.IN != 0) break; // Exit signal received
         }
         std.log.info("PTY read thread exiting for session {}", .{self.id});
 
@@ -1983,6 +2007,7 @@ test "ScreenState style optimization" {
         .title = std.ArrayList(u8).empty,
         .title_dirty = false,
         .pipe_fds = undefined, // Not used
+        .exit_pipe_fds = undefined, // Not used
         .render_state = .empty,
         .server_ptr = undefined, // Not used
     };
@@ -2078,6 +2103,8 @@ test "server - pty exit notification" {
             // Manually cleanup pty resources
             posix.close(p.*.pipe_fds[0]);
             posix.close(p.*.pipe_fds[1]);
+            posix.close(p.*.exit_pipe_fds[0]);
+            posix.close(p.*.exit_pipe_fds[1]);
             p.*.terminal.deinit(allocator);
             p.*.render_state.deinit(allocator);
             p.*.clients.deinit(allocator);
@@ -2099,6 +2126,7 @@ test "server - pty exit notification" {
 
     // Create a dummy Pty
     const pipe_fds = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
+    const exit_pipe_fds = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
     const pty_inst = try allocator.create(Pty);
     pty_inst.* = .{
         .id = 1,
@@ -2110,6 +2138,7 @@ test "server - pty exit notification" {
         .title = std.ArrayList(u8).empty,
         .title_dirty = false,
         .pipe_fds = pipe_fds,
+        .exit_pipe_fds = exit_pipe_fds,
         .render_state = .empty,
         .server_ptr = &server,
         .exited = std.atomic.Value(bool).init(false),
