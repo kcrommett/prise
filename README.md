@@ -49,6 +49,10 @@ The following binaries are required for development:
 
 ## Vibe Coding
 
+**Core Thesis**: High-performance software is the result of quality engineering.
+
+Prise is built on a solid foundation of `libghostty`, `libvaxis`, and Lua. While these tools provide an excellent starting point, they do not guarantee success—it is still entirely possible to build bad software with good tools. We believe that **vibe coding**—leveraging AI assistance to amplify engineering capabilities—is capable of consistently producing the quality software we demand.
+
 Prise is a vibe coded project. Contributions are welcome, but preference is given to AI-developed code.
 
 *   Sharing of AI conversation threads is preferred when submitting contributions, even if those threads did not directly result in the final Pull Request.
