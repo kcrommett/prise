@@ -92,13 +92,45 @@ pub fn isCellSelected(self: *const Surface, row: u16, col: u16) bool {
 }
 
 pub fn resize(self: *Surface, rows: u16, cols: u16) !void {
-    // Deinit old screens
+    // Create new screens first
+    var new_front = try vaxis.AllocatingScreen.init(self.allocator, cols, rows);
+    errdefer new_front.deinit(self.allocator);
+
+    var new_back = try vaxis.AllocatingScreen.init(self.allocator, cols, rows);
+    errdefer new_back.deinit(self.allocator);
+
+    // Copy content from old buffers to new (up to min dimensions)
+    const copy_rows = @min(self.rows, rows);
+    const copy_cols = @min(self.cols, cols);
+
+    for (0..copy_rows) |row| {
+        for (0..copy_cols) |col| {
+            if (self.front.readCell(@intCast(col), @intCast(row))) |cell| {
+                new_front.writeCell(@intCast(col), @intCast(row), cell);
+            }
+            if (self.back.readCell(@intCast(col), @intCast(row))) |cell| {
+                new_back.writeCell(@intCast(col), @intCast(row), cell);
+            }
+        }
+    }
+
+    // Copy cursor state (clamped to new bounds)
+    new_front.cursor_row = @min(self.front.cursor_row, rows -| 1);
+    new_front.cursor_col = @min(self.front.cursor_col, cols -| 1);
+    new_front.cursor_vis = self.front.cursor_vis;
+    new_front.cursor_shape = self.front.cursor_shape;
+
+    new_back.cursor_row = @min(self.back.cursor_row, rows -| 1);
+    new_back.cursor_col = @min(self.back.cursor_col, cols -| 1);
+    new_back.cursor_vis = self.back.cursor_vis;
+    new_back.cursor_shape = self.back.cursor_shape;
+
+    // Deinit old screens and swap in new ones
     self.front.deinit(self.allocator);
     self.back.deinit(self.allocator);
 
-    // Reinit with new size
-    self.front.* = try vaxis.AllocatingScreen.init(self.allocator, cols, rows);
-    self.back.* = try vaxis.AllocatingScreen.init(self.allocator, cols, rows);
+    self.front.* = new_front;
+    self.back.* = new_back;
 
     self.rows = rows;
     self.cols = cols;
