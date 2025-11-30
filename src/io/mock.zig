@@ -1,6 +1,10 @@
+//! Mock I/O backend for deterministic testing.
+
 const std = @import("std");
-const posix = std.posix;
+
 const root = @import("../io.zig");
+
+const posix = std.posix;
 
 pub const Loop = struct {
     allocator: std.mem.Allocator,
@@ -73,7 +77,7 @@ pub const Loop = struct {
             .result = .{ .socket = fd },
         });
 
-        return root.Task{ .id = id, .ctx = ctx };
+        return .{ .id = id, .ctx = ctx };
     }
 
     pub fn connect(
@@ -95,7 +99,7 @@ pub const Loop = struct {
             .fd = fd,
         });
 
-        return root.Task{ .id = id, .ctx = ctx };
+        return .{ .id = id, .ctx = ctx };
     }
 
     pub fn accept(
@@ -112,7 +116,7 @@ pub const Loop = struct {
             .fd = fd,
         });
 
-        return root.Task{ .id = id, .ctx = ctx };
+        return .{ .id = id, .ctx = ctx };
     }
 
     pub fn read(
@@ -131,7 +135,7 @@ pub const Loop = struct {
             .buf = buf,
         });
 
-        return root.Task{ .id = id, .ctx = ctx };
+        return .{ .id = id, .ctx = ctx };
     }
 
     pub fn recv(
@@ -150,7 +154,7 @@ pub const Loop = struct {
             .buf = buf,
         });
 
-        return root.Task{ .id = id, .ctx = ctx };
+        return .{ .id = id, .ctx = ctx };
     }
 
     pub fn send(
@@ -169,7 +173,7 @@ pub const Loop = struct {
             .buf = @constCast(buf),
         });
 
-        return root.Task{ .id = id, .ctx = ctx };
+        return .{ .id = id, .ctx = ctx };
     }
 
     pub fn close(
@@ -192,7 +196,7 @@ pub const Loop = struct {
             .result = .{ .close = {} },
         });
 
-        return root.Task{ .id = id, .ctx = ctx };
+        return .{ .id = id, .ctx = ctx };
     }
 
     pub fn timeout(
@@ -216,7 +220,7 @@ pub const Loop = struct {
             .result = .{ .timer = {} },
         });
 
-        return root.Task{ .id = id, .ctx = ctx };
+        return .{ .id = id, .ctx = ctx };
     }
 
     pub fn cancel(self: *Loop, id: usize) !void {
@@ -232,7 +236,7 @@ pub const Loop = struct {
     }
 
     pub fn cancelByFd(self: *Loop, fd: posix.socket_t) void {
-        var ids_to_cancel = std.ArrayList(usize){};
+        var ids_to_cancel: std.ArrayList(usize) = .{};
         defer ids_to_cancel.deinit(self.allocator);
 
         var it = self.pending.iterator();
@@ -382,7 +386,7 @@ test "mock loop - basic socket operation" {
         completed: *bool,
     };
 
-    var state = State{
+    var state: State = .{
         .fd = &socket_fd,
         .completed = &completed,
     };
@@ -424,7 +428,7 @@ test "mock loop - connect operation" {
         connected: *bool,
     };
 
-    var state = State{
+    var state: State = .{
         .connected = &connected,
     };
 
@@ -465,7 +469,7 @@ test "mock loop - accept operation" {
         accepted: *bool,
     };
 
-    var state = State{
+    var state: State = .{
         .fd = &client_fd,
         .accepted = &accepted,
     };
@@ -509,7 +513,7 @@ test "mock loop - recv operation" {
         bytes: *usize,
     };
 
-    var state = State{
+    var state: State = .{
         .bytes = &bytes_received,
     };
 
@@ -548,7 +552,7 @@ test "mock loop - close operation" {
         closed: *bool,
     };
 
-    var state = State{
+    var state: State = .{
         .closed = &closed,
     };
 
@@ -585,7 +589,7 @@ test "mock loop - cancel operation" {
         completed: *bool,
     };
 
-    var state = State{
+    var state: State = .{
         .completed = &completed,
     };
 
@@ -630,7 +634,7 @@ test "mock loop - cancelByFd operation" {
         completed: *bool,
     };
 
-    var state = State{
+    var state: State = .{
         .completed = &completed,
     };
 

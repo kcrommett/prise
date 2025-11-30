@@ -1,4 +1,7 @@
+//! Virtual terminal escape sequence handler.
+
 const std = @import("std");
+
 const ghostty_vt = @import("ghostty-vt");
 
 // Helper aliases for ghostty types

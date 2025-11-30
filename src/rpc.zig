@@ -1,5 +1,9 @@
+//! MessagePack-RPC protocol encoding and decoding.
+
 const std = @import("std");
+
 const msgpack = @import("msgpack.zig");
+
 const Allocator = std.mem.Allocator;
 
 /// msgpack-RPC message types

@@ -1,6 +1,9 @@
+//! MessagePack binary serialization format implementation.
+
 const std = @import("std");
-const testing = std.testing;
+
 const Allocator = std.mem.Allocator;
+const testing = std.testing;
 
 pub const EncodeError = error{
     OutOfMemory,
@@ -434,9 +437,9 @@ pub const Decoder = struct {
         self.pos += 1;
 
         if (byte <= 0x7f) {
-            return Value{ .unsigned = byte };
+            return .{ .unsigned = byte };
         } else if (byte >= 0xe0) {
-            return Value{ .integer = @as(i8, @bitCast(byte)) };
+            return .{ .integer = @as(i8, @bitCast(byte)) };
         } else if (byte >= 0xa0 and byte <= 0xbf) {
             const len = byte & 0x1f;
             return try self.decodeStringWithLen(len);
@@ -449,19 +452,19 @@ pub const Decoder = struct {
         }
 
         return switch (byte) {
-            0xc0 => Value.nil,
-            0xc2 => Value{ .boolean = false },
-            0xc3 => Value{ .boolean = true },
-            0xcc => Value{ .unsigned = try self.readByte() },
-            0xcd => Value{ .unsigned = try self.readU16() },
-            0xce => Value{ .unsigned = try self.readU32() },
-            0xcf => Value{ .unsigned = try self.readU64() },
-            0xd0 => Value{ .integer = try self.readI8() },
-            0xd1 => Value{ .integer = try self.readI16() },
-            0xd2 => Value{ .integer = try self.readI32() },
-            0xd3 => Value{ .integer = try self.readI64() },
-            0xca => Value{ .float = @floatCast(try self.readF32()) },
-            0xcb => Value{ .float = try self.readF64() },
+            0xc0 => .nil,
+            0xc2 => .{ .boolean = false },
+            0xc3 => .{ .boolean = true },
+            0xcc => .{ .unsigned = try self.readByte() },
+            0xcd => .{ .unsigned = try self.readU16() },
+            0xce => .{ .unsigned = try self.readU32() },
+            0xcf => .{ .unsigned = try self.readU64() },
+            0xd0 => .{ .integer = try self.readI8() },
+            0xd1 => .{ .integer = try self.readI16() },
+            0xd2 => .{ .integer = try self.readI32() },
+            0xd3 => .{ .integer = try self.readI64() },
+            0xca => .{ .float = @floatCast(try self.readF32()) },
+            0xcb => .{ .float = try self.readF64() },
             0xd9 => blk: {
                 const len = try self.readByte();
                 break :blk try self.decodeStringWithLen(len);
@@ -950,13 +953,13 @@ pub const Decoder = struct {
     fn decodeStringWithLen(self: *Decoder, len: u64) !Value {
         const bytes = try self.readBytes(@intCast(len));
         const str = try self.allocator.dupe(u8, bytes);
-        return Value{ .string = str };
+        return .{ .string = str };
     }
 
     fn decodeBinaryWithLen(self: *Decoder, len: u64) !Value {
         const bytes = try self.readBytes(@intCast(len));
         const bin = try self.allocator.dupe(u8, bytes);
-        return Value{ .binary = bin };
+        return .{ .binary = bin };
     }
 
     fn decodeArrayWithLen(self: *Decoder, len: u64) !Value {
@@ -972,7 +975,7 @@ pub const Decoder = struct {
             };
         }
 
-        return Value{ .array = arr };
+        return .{ .array = arr };
     }
 
     fn decodeMapWithLen(self: *Decoder, len: u64) !Value {
@@ -999,7 +1002,7 @@ pub const Decoder = struct {
             };
         }
 
-        return Value{ .map = map };
+        return .{ .map = map };
     }
 };
 

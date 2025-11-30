@@ -1,13 +1,18 @@
+//! UI layout and widget tree management.
+
 const std = @import("std");
-const ziglua = @import("zlua");
+
 const vaxis = @import("vaxis");
-const widget = @import("widget.zig");
-const lua_event = @import("lua_event.zig");
+const ziglua = @import("zlua");
+
 const io = @import("io.zig");
+const lua_event = @import("lua_event.zig");
 const msgpack = @import("msgpack.zig");
 const Surface = @import("Surface.zig");
 const TextInput = @import("TextInput.zig");
+const widget = @import("widget.zig");
 
+const log = std.log.scoped(.ui);
 const logger = std.log.scoped(.lua);
 
 const prise_module = @embedFile("lua/prise.lua");
@@ -107,12 +112,12 @@ pub const UI = struct {
 
         if (use_default) {
             lua.doString(default_ui) catch |err| {
-                std.log.err("Failed to load default UI: {}", .{err});
+                log.err("Failed to load default UI: {}", .{err});
                 return error.DefaultUIFailed;
             };
         } else {
             lua.doFile(config_path) catch |err| {
-                std.log.err("Failed to load init.lua: {}", .{err});
+                log.err("Failed to load init.lua: {}", .{err});
                 return error.InitLuaFailed;
             };
         }
@@ -127,7 +132,7 @@ pub const UI = struct {
 
         // Initialize PrisePty metatable
         lua_event.registerMetatable(lua) catch |err| {
-            std.log.err("Failed to register metatable: {}", .{err});
+            log.err("Failed to register metatable: {}", .{err});
             return err;
         };
 
@@ -418,7 +423,7 @@ pub const UI = struct {
         _ = ctx.ui.lua.rawGetIndex(ziglua.registry_index, timer.callback_ref);
         ctx.ui.lua.protectedCall(.{ .args = 0, .results = 0, .msg_handler = 0 }) catch {
             const err = ctx.ui.lua.toString(-1) catch "Unknown error";
-            std.log.err("Lua timeout callback error: {s}", .{err});
+            log.err("Lua timeout callback error: {s}", .{err});
             ctx.ui.lua.pop(1);
         };
 
@@ -451,7 +456,7 @@ pub const UI = struct {
 
         self.lua.protectedCall(.{ .args = 1, .results = 0, .msg_handler = 0 }) catch |err| {
             const msg = self.lua.toString(-1) catch "Unknown Lua error";
-            std.log.err("Lua update error: {s}", .{msg});
+            log.err("Lua update error: {s}", .{msg});
             self.lua.pop(1); // pop error message
             return err;
         };
@@ -483,7 +488,7 @@ pub const UI = struct {
 
         self.lua.protectedCall(.{ .args = 0, .results = 1, .msg_handler = 0 }) catch |err| {
             const msg = self.lua.toString(-1) catch "Unknown Lua error";
-            std.log.err("Lua get_state error: {s}", .{msg});
+            log.err("Lua get_state error: {s}", .{msg});
             self.lua.pop(1);
             return err;
         };
@@ -526,7 +531,7 @@ pub const UI = struct {
 
         self.lua.protectedCall(.{ .args = 2, .results = 0, .msg_handler = 0 }) catch |err| {
             const msg = self.lua.toString(-1) catch "Unknown Lua error";
-            std.log.err("Lua set_state error: {s}", .{msg});
+            log.err("Lua set_state error: {s}", .{msg});
             self.lua.pop(1);
             self.allocator.destroy(lookup_ctx);
             return err;

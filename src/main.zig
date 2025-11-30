@@ -1,9 +1,13 @@
+//! Entry point for the prise terminal multiplexer client.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const io = @import("io.zig");
 const server = @import("server.zig");
 const client = @import("client.zig");
 const posix = std.posix;
+
+const log = std.log.scoped(.main);
 
 pub fn main() !void {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
@@ -43,13 +47,13 @@ pub fn main() !void {
 
     std.fs.accessAbsolute(socket_path, .{}) catch |err| {
         if (err == error.FileNotFound) {
-            std.log.err("Server not running. Start it with: prise serve", .{});
+            log.err("Server not running. Start it with: prise serve", .{});
             return error.ServerNotRunning;
         }
         return err;
     };
 
-    std.log.info("Connecting to server at {s}", .{socket_path});
+    log.info("Connecting to server at {s}", .{socket_path});
 
     var loop = try io.Loop.init(allocator);
     defer loop.deinit();
@@ -67,7 +71,7 @@ pub fn main() !void {
     try loop.run(.until_done);
 
     if (app.state.connection_refused) {
-        std.log.err("Connection refused. Server may have crashed. Start it with: prise serve", .{});
+        log.err("Connection refused. Server may have crashed. Start it with: prise serve", .{});
         posix.unlink(socket_path) catch {};
         return error.ConnectionRefused;
     }
@@ -80,7 +84,7 @@ fn findMostRecentSession(allocator: std.mem.Allocator) ![]const u8 {
 
     var dir = std.fs.openDirAbsolute(sessions_dir, .{ .iterate = true }) catch |err| {
         if (err == error.FileNotFound) {
-            std.log.err("No sessions directory found", .{});
+            log.err("No sessions directory found", .{});
             return error.NoSessionsFound;
         }
         return err;
@@ -109,11 +113,11 @@ fn findMostRecentSession(allocator: std.mem.Allocator) ![]const u8 {
     }
 
     if (most_recent) |name| {
-        std.log.info("Attaching to most recent session: {s}", .{name});
+        log.info("Attaching to most recent session: {s}", .{name});
         return name;
     }
 
-    std.log.err("No session files found", .{});
+    log.err("No session files found", .{});
     return error.NoSessionsFound;
 }
 

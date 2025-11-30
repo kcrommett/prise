@@ -1,5 +1,9 @@
+//! Redraw event types and builder for screen updates.
+
 const std = @import("std");
+
 const msgpack = @import("msgpack.zig");
+
 const Allocator = std.mem.Allocator;
 
 /// Prise UI protocol for screen updates

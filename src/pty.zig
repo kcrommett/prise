@@ -1,6 +1,11 @@
+//! Pseudo-terminal (PTY) creation and management.
+
 const std = @import("std");
 const builtin = @import("builtin");
+
 const posix = std.posix;
+
+const log = std.log.scoped(.pty);
 
 const c = switch (builtin.os.tag) {
     .macos => @cImport({
@@ -83,7 +88,7 @@ pub const Process = struct {
 
         if (pid == 0) {
             childProcess(allocator, slave_fd, master_fd, argv, env) catch |err| {
-                std.log.err("child process failed: {}", .{err});
+                log.err("child process failed: {}", .{err});
                 posix.exit(1);
             };
             unreachable;
@@ -153,7 +158,7 @@ pub const Process = struct {
             posix.execvpeZ(argv_z[0].?, @ptrCast(argv_z[0..argv.len :null]), @ptrCast(ez))
         else
             posix.execveZ(argv_z[0].?, @ptrCast(argv_z[0..argv.len :null]), @ptrCast(std.c.environ));
-        std.log.err("execvpe failed: {}", .{err});
+        log.err("execvpe failed: {}", .{err});
         return error.ExecFailed;
     }
 

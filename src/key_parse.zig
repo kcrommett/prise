@@ -1,5 +1,9 @@
+//! Keyboard input parsing from MessagePack format.
+
 const std = @import("std");
+
 const ghostty = @import("ghostty-vt");
+
 const msgpack = @import("msgpack.zig");
 
 const KeyEvent = ghostty.input.KeyEvent;

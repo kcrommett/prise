@@ -1,4 +1,7 @@
+//! Helper utilities for vaxis terminal library.
+
 const std = @import("std");
+
 const vaxis = @import("vaxis");
 
 pub const KeyStrings = struct {

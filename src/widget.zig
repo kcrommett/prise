@@ -1,7 +1,13 @@
+//! Widget system for building terminal UI layouts.
+
 const std = @import("std");
-const ziglua = @import("zlua");
+
 const vaxis = @import("vaxis");
+const ziglua = @import("zlua");
+
 const lua_event = @import("lua_event.zig");
+
+const log = std.log.scoped(.widget);
 
 pub const BoxConstraints = struct {
     min_width: u16,
@@ -100,6 +106,10 @@ pub const Widget = struct {
                 b.child.deinit(allocator);
                 allocator.destroy(b.child);
             },
+            .padding => |*p| {
+                p.child.deinit(allocator);
+                allocator.destroy(p.child);
+            },
             .column => |*c| {
                 for (c.children) |*child| {
                     child.deinit(allocator);
@@ -141,8 +151,19 @@ pub const Widget = struct {
             },
             .box => |*b| blk: {
                 const border_size: u16 = if (b.border == .none) 0 else 2;
-                const inner_max_w = if (constraints.max_width) |w| (if (w > border_size) w - border_size else 0) else null;
-                const inner_max_h = if (constraints.max_height) |h| (if (h > border_size) h - border_size else 0) else null;
+
+                // Apply box's own constraints on top of parent constraints
+                const effective_max_w = if (b.max_width) |bw|
+                    if (constraints.max_width) |cw| @min(bw, cw) else bw
+                else
+                    constraints.max_width;
+                const effective_max_h = if (b.max_height) |bh|
+                    if (constraints.max_height) |ch| @min(bh, ch) else bh
+                else
+                    constraints.max_height;
+
+                const inner_max_w = if (effective_max_w) |w| (if (w > border_size) w - border_size else 0) else null;
+                const inner_max_h = if (effective_max_h) |h| (if (h > border_size) h - border_size else 0) else null;
 
                 const child_size = b.child.layout(.{
                     .min_width = 0,
@@ -160,6 +181,29 @@ pub const Widget = struct {
                     .height = child_size.height + border_size,
                 };
             },
+            .padding => |*p| blk: {
+                const h_padding = p.left + p.right;
+                const v_padding = p.top + p.bottom;
+
+                const inner_max_w = if (constraints.max_width) |w| (if (w > h_padding) w - h_padding else 0) else null;
+                const inner_max_h = if (constraints.max_height) |h| (if (h > v_padding) h - v_padding else 0) else null;
+
+                const child_size = p.child.layout(.{
+                    .min_width = 0,
+                    .max_width = inner_max_w,
+                    .min_height = 0,
+                    .max_height = inner_max_h,
+                });
+                p.child.x = p.left;
+                p.child.y = p.top;
+                p.child.width = child_size.width;
+                p.child.height = child_size.height;
+
+                break :blk Size{
+                    .width = child_size.width + h_padding,
+                    .height = child_size.height + v_padding,
+                };
+            },
             .column => |*col| blk: {
                 const total_height = constraints.max_height orelse 0;
                 var width: u16 = 0;
@@ -169,7 +213,7 @@ pub const Widget = struct {
                 var nil_count: u16 = 0;
 
                 for (col.children) |*child| {
-                    const is_intrinsic = child.ratio == null and child.kind == .text;
+                    const is_intrinsic = child.ratio == null and (child.kind == .text or child.kind == .text_input or child.kind == .list);
                     if (is_intrinsic) {
                         const remaining = if (total_height > intrinsic_height) total_height - intrinsic_height else 0;
                         const child_constraints: BoxConstraints = .{
@@ -216,7 +260,7 @@ pub const Widget = struct {
                     var remaining = remaining_for_nil;
                     var count = nil_count;
                     for (col.children) |*child| {
-                        const is_intrinsic = child.kind == .text;
+                        const is_intrinsic = child.kind == .text or child.kind == .text_input or child.kind == .list;
                         if (child.ratio == null and !is_intrinsic) {
                             const share = remaining / count;
                             remaining -= share;
@@ -240,6 +284,7 @@ pub const Widget = struct {
                 var current_y: u16 = 0;
                 var final_height: u16 = 0;
                 for (col.children) |*child| {
+                    log.debug("Column child kind={} h={}", .{ child.kind, child.height });
                     child.y = current_y;
 
                     switch (col.cross_axis_align) {
@@ -374,7 +419,7 @@ pub const Widget = struct {
                 const alloc = gpa.allocator();
                 defer _ = gpa.deinit();
 
-                var iter = Text.Iterator{
+                var iter: Text.Iterator = .{
                     .text = text.*,
                     .max_width = constraints.max_width orelse 65535,
                     .allocator = alloc,
@@ -430,10 +475,12 @@ pub const Widget = struct {
 
                 pos.child.x = pos.x orelse anchor_x;
                 pos.child.y = pos.y orelse anchor_y;
+                pos.child.width = child_size.width;
+                pos.child.height = child_size.height;
 
                 break :blk Size{
-                    .width = child_size.width,
-                    .height = child_size.height,
+                    .width = pos.child.x + child_size.width,
+                    .height = pos.child.y + child_size.height,
                 };
             },
         };
@@ -481,6 +528,7 @@ pub const Widget = struct {
 
         try self.collectHitRegionsRecursive(allocator, &regions, offset_x, offset_y);
 
+        if (regions.items.len == 0) return &.{};
         return regions.toOwnedSlice(allocator);
     }
 
@@ -514,6 +562,9 @@ pub const Widget = struct {
             .box => |b| {
                 try b.child.collectHitRegionsRecursive(allocator, regions, abs_x, abs_y);
             },
+            .padding => |p| {
+                try p.child.collectHitRegionsRecursive(allocator, regions, abs_x, abs_y);
+            },
             .stack => |stack| {
                 for (stack.children) |*child| {
                     try child.collectHitRegionsRecursive(allocator, regions, abs_x, abs_y);
@@ -531,6 +582,7 @@ pub const Widget = struct {
 
         try self.collectSplitHandlesRecursive(allocator, &handles, offset_x, offset_y);
 
+        if (handles.items.len == 0) return &.{};
         return handles.toOwnedSlice(allocator);
     }
 
@@ -596,6 +648,9 @@ pub const Widget = struct {
             .positioned => |pos| {
                 try pos.child.collectSplitHandlesRecursive(allocator, handles, abs_x, abs_y);
             },
+            .padding => |p| {
+                try p.child.collectSplitHandlesRecursive(allocator, handles, abs_x, abs_y);
+            },
         }
     }
 };
@@ -637,6 +692,7 @@ pub const WidgetKind = union(enum) {
     text_input: TextInputWidget,
     list: List,
     box: Box,
+    padding: Padding,
     column: Column,
     row: Row,
     stack: Stack,
@@ -709,6 +765,8 @@ pub const Box = struct {
     child: *Widget,
     border: Border = .single,
     style: vaxis.Style = .{},
+    max_width: ?u16 = null,
+    max_height: ?u16 = null,
 
     pub const Border = enum {
         none,
@@ -725,6 +783,14 @@ pub const Box = struct {
             .rounded => .{ .tl = "╭", .tr = "╮", .bl = "╰", .br = "╯", .h = "─", .v = "│" },
         };
     }
+};
+
+pub const Padding = struct {
+    child: *Widget,
+    top: u16 = 0,
+    bottom: u16 = 0,
+    left: u16 = 0,
+    right: u16 = 0,
 };
 
 pub const Text = struct {
@@ -919,8 +985,11 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
 
     var focus: bool = false;
     _ = lua.getField(index, "focus");
-    if (lua.typeOf(-1) == .boolean) {
+    const focus_type = lua.typeOf(-1);
+    log.debug("parseWidget: focus field type={}", .{focus_type});
+    if (focus_type == .boolean) {
         focus = lua.toBoolean(-1);
+        log.debug("parseWidget: focus={}", .{focus});
     } else {
         // Legacy support for show_cursor
         lua.pop(1);
@@ -1083,10 +1152,77 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         }
         lua.pop(1);
 
+        var max_width: ?u16 = null;
+        _ = lua.getField(index, "max_width");
+        if (lua.typeOf(-1) == .number) {
+            max_width = @intCast(lua.toInteger(-1) catch 0);
+        }
+        lua.pop(1);
+
+        var max_height: ?u16 = null;
+        _ = lua.getField(index, "max_height");
+        if (lua.typeOf(-1) == .number) {
+            max_height = @intCast(lua.toInteger(-1) catch 0);
+        }
+        lua.pop(1);
+
         return .{ .ratio = ratio, .id = id, .focus = focus, .kind = .{ .box = .{
             .child = child,
             .border = border,
             .style = style,
+            .max_width = max_width,
+            .max_height = max_height,
+        } } };
+    } else if (std.mem.eql(u8, widget_type, "padding")) {
+        _ = lua.getField(index, "child");
+        if (lua.typeOf(-1) != .table) {
+            lua.pop(1);
+            return error.MissingPaddingChild;
+        }
+        const child_widget = try parseWidget(lua, allocator, -1);
+        lua.pop(1);
+
+        const child = try allocator.create(Widget);
+        errdefer allocator.destroy(child);
+        child.* = child_widget;
+
+        var top: u16 = 0;
+        var bottom: u16 = 0;
+        var left: u16 = 0;
+        var right: u16 = 0;
+
+        _ = lua.getField(index, "all");
+        if (lua.typeOf(-1) == .number) {
+            const all: u16 = @intCast(lua.toInteger(-1) catch 0);
+            top = all;
+            bottom = all;
+            left = all;
+            right = all;
+        }
+        lua.pop(1);
+
+        _ = lua.getField(index, "top");
+        if (lua.typeOf(-1) == .number) top = @intCast(lua.toInteger(-1) catch 0);
+        lua.pop(1);
+
+        _ = lua.getField(index, "bottom");
+        if (lua.typeOf(-1) == .number) bottom = @intCast(lua.toInteger(-1) catch 0);
+        lua.pop(1);
+
+        _ = lua.getField(index, "left");
+        if (lua.typeOf(-1) == .number) left = @intCast(lua.toInteger(-1) catch 0);
+        lua.pop(1);
+
+        _ = lua.getField(index, "right");
+        if (lua.typeOf(-1) == .number) right = @intCast(lua.toInteger(-1) catch 0);
+        lua.pop(1);
+
+        return .{ .ratio = ratio, .id = id, .focus = focus, .kind = .{ .padding = .{
+            .child = child,
+            .top = top,
+            .bottom = bottom,
+            .left = left,
+            .right = right,
         } } };
     } else if (std.mem.eql(u8, widget_type, "column")) {
         _ = lua.getField(index, "children");
@@ -1409,18 +1545,18 @@ test "Column Layout - Intrinsic + Proportional" {
     const allocator = testing.allocator;
 
     // Create widgets manually
-    var child1 = Widget{
+    var child1: Widget = .{
         .kind = .{ .text = .{ .spans = try allocator.dupe(Text.Span, &.{.{ .text = "Fixed", .style = .{} }}) } },
     };
     // Manually copy string because deinit will try to free it
     child1.kind.text.spans[0].text = try allocator.dupe(u8, "Fixed");
 
-    const child2 = Widget{
+    const child2: Widget = .{
         .kind = .{ .surface = .{ .pty_id = 1 } },
     };
 
     var children = [_]Widget{ child1, child2 };
-    var col = Widget{
+    var col: Widget = .{
         .kind = .{ .column = .{ .children = &children } },
     };
 
@@ -1453,22 +1589,22 @@ test "Column Layout - Stretch Width" {
     const allocator = testing.allocator;
 
     // Child 1: Text "Small"
-    var child1 = Widget{
+    var child1: Widget = .{
         .kind = .{ .text = .{ .spans = try allocator.dupe(Text.Span, &.{.{ .text = "Small", .style = .{} }}) } },
     };
     child1.kind.text.spans[0].text = try allocator.dupe(u8, "Small");
 
     // Child 2: Surface (Full Width)
-    const child2 = Widget{
+    const child2: Widget = .{
         .kind = .{ .surface = .{ .pty_id = 1 } },
     };
 
     var children = [_]Widget{ child1, child2 };
-    var col = Widget{
+    var col: Widget = .{
         .kind = .{ .column = .{ .children = &children, .cross_axis_align = .stretch } },
     };
 
-    const constraints = BoxConstraints{
+    const constraints: BoxConstraints = .{
         .min_width = 0,
         .max_width = 100,
         .min_height = 0,
@@ -1605,9 +1741,9 @@ test "Text Iterator" {
     var spans = [_]Text.Span{
         .{ .text = "Hello World", .style = .{} },
     };
-    const text = Text{ .spans = &spans, .wrap = .word };
+    const text: Text = .{ .spans = &spans, .wrap = .word };
 
-    var iter = Text.Iterator{
+    var iter: Text.Iterator = .{
         .text = text,
         .max_width = 5,
         .allocator = allocator,
@@ -1628,8 +1764,8 @@ test "Text Iterator" {
     try testing.expect((try iter.next()) == null);
 
     // Test no wrap
-    const text_nowrap = Text{ .spans = &spans, .wrap = .none };
-    var iter_nowrap = Text.Iterator{
+    const text_nowrap: Text = .{ .spans = &spans, .wrap = .none };
+    var iter_nowrap: Text.Iterator = .{
         .text = text_nowrap,
         .max_width = 8,
         .allocator = allocator,
@@ -1644,16 +1780,16 @@ test "Text Iterator" {
 test "Stack Layout" {
     const testing = std.testing;
 
-    const child1 = Widget{
+    const child1: Widget = .{
         .kind = .{ .surface = .{ .pty_id = 1 } },
     };
 
-    const child2 = Widget{
+    const child2: Widget = .{
         .kind = .{ .surface = .{ .pty_id = 2 } },
     };
 
     var children = [_]Widget{ child1, child2 };
-    var stack = Widget{
+    var stack: Widget = .{
         .kind = .{ .stack = .{ .children = &children } },
     };
 
@@ -1678,11 +1814,11 @@ test "Stack Layout" {
 test "Positioned Layout - explicit position" {
     const testing = std.testing;
 
-    var child = Widget{
+    var child: Widget = .{
         .kind = .{ .surface = .{ .pty_id = 1 } },
     };
 
-    var pos = Widget{
+    var pos: Widget = .{
         .kind = .{ .positioned = .{
             .child = &child,
             .x = 10,
@@ -1707,13 +1843,13 @@ test "Positioned Layout - explicit position" {
 test "Positioned Layout - center anchor" {
     const testing = std.testing;
 
-    const span = Text.Span{ .text = "Hello", .style = .{} };
+    const span: Text.Span = .{ .text = "Hello", .style = .{} };
     var spans = [_]Text.Span{span};
-    var child = Widget{
+    var child: Widget = .{
         .kind = .{ .text = .{ .spans = &spans } },
     };
 
-    var pos = Widget{
+    var pos: Widget = .{
         .kind = .{ .positioned = .{
             .child = &child,
             .x = null,

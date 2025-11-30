@@ -1,15 +1,19 @@
+//! Client-side networking and application state management.
+
 const std = @import("std");
+const vaxis = @import("vaxis");
 const io = @import("io.zig");
-const rpc = @import("rpc.zig");
+const lua_event = @import("lua_event.zig");
 const msgpack = @import("msgpack.zig");
 const redraw = @import("redraw.zig");
-const posix = std.posix;
-const vaxis = @import("vaxis");
+const rpc = @import("rpc.zig");
 const Surface = @import("Surface.zig");
 const UI = @import("ui.zig").UI;
-const lua_event = @import("lua_event.zig");
-const widget = @import("widget.zig");
 const vaxis_helper = @import("vaxis_helper.zig");
+const widget = @import("widget.zig");
+const posix = std.posix;
+
+const log = std.log.scoped(.client);
 
 pub const MsgId = enum(u16) {
     spawn_pty = 1,
@@ -206,16 +210,16 @@ pub const ClientLogic = struct {
             .response => |resp| {
                 state.response_received = true;
 
-                std.log.info("processServerMessage: response msgid={}", .{resp.msgid});
+                log.info("processServerMessage: response msgid={}", .{resp.msgid});
                 const request_info = state.pending_requests.fetchRemove(resp.msgid);
 
                 if (resp.err) |err_val| {
                     _ = err_val;
-                    std.log.err("Error in response", .{});
+                    log.err("Error in response", .{});
                     return .none;
                 } else {
                     if (request_info) |entry| {
-                        std.log.info("processServerMessage: found pending request: {s}", .{@tagName(entry.value)});
+                        log.info("processServerMessage: found pending request: {s}", .{@tagName(entry.value)});
                         switch (entry.value) {
                             .spawn => {
                                 const id: i64 = switch (resp.result) {
@@ -223,17 +227,17 @@ pub const ClientLogic = struct {
                                     .unsigned => |u| @intCast(u),
                                     else => -1,
                                 };
-                                std.log.info("processServerMessage: spawn result id={}", .{id});
+                                log.info("processServerMessage: spawn result id={}", .{id});
                                 if (id >= 0) {
                                     state.pty_id = id; // Last attached
                                     state.attached = true;
-                                    return ServerAction{ .attached = id };
+                                    return .{ .attached = id };
                                 }
                             },
                             .attach => |id| {
                                 state.pty_id = id;
                                 state.attached = true;
-                                return ServerAction{ .attached = id };
+                                return .{ .attached = id };
                             },
                             .detach => {
                                 return ServerAction.detached;
@@ -245,28 +249,28 @@ pub const ClientLogic = struct {
                                 // Legacy fallback or unsolicited?
                                 if (state.pty_id == null) {
                                     state.pty_id = i;
-                                    return ServerAction{ .send_attach = i };
+                                    return .{ .send_attach = i };
                                 } else if (!state.attached) {
                                     state.attached = true;
-                                    return ServerAction{ .attached = i };
+                                    return .{ .attached = i };
                                 }
                             },
                             .unsigned => |u| {
                                 if (state.pty_id == null) {
                                     state.pty_id = @intCast(u);
                                     state.attached = true;
-                                    return ServerAction{ .attached = @intCast(u) };
+                                    return .{ .attached = @intCast(u) };
                                 } else if (!state.attached) {
                                     state.attached = true;
-                                    return ServerAction{ .attached = @intCast(u) };
+                                    return .{ .attached = @intCast(u) };
                                 }
                             },
                             .string => |s| {
-                                std.log.info("{s}", .{s});
+                                log.info("{s}", .{s});
                                 return .none;
                             },
                             else => {
-                                std.log.info("Unknown result type", .{});
+                                log.info("Unknown result type", .{});
                                 return .none;
                             },
                         }
@@ -274,12 +278,12 @@ pub const ClientLogic = struct {
                 }
             },
             .request => {
-                std.log.warn("Got unexpected request from server", .{});
+                log.warn("Got unexpected request from server", .{});
                 return .none;
             },
             .notification => |notif| {
                 if (std.mem.eql(u8, notif.method, "redraw")) {
-                    return ServerAction{ .redraw = notif.params };
+                    return .{ .redraw = notif.params };
                 } else if (std.mem.eql(u8, notif.method, "pty_exited")) {
                     if (notif.params == .array and notif.params.array.len >= 2) {
                         const pty_id = switch (notif.params.array[0]) {
@@ -292,7 +296,7 @@ pub const ClientLogic = struct {
                             .unsigned => |u| @as(u32, @intCast(u)),
                             else => 0,
                         };
-                        return ServerAction{ .pty_exited = .{ .pty_id = pty_id, .status = status } };
+                        return .{ .pty_exited = .{ .pty_id = pty_id, .status = status } };
                     }
                 }
             },
@@ -310,7 +314,7 @@ pub const ClientLogic = struct {
             if (value.array.len < 2 or value.array[1] != .map) return .none;
             const key_map = value.array[1];
             if (state.attached and state.pty_id != null) {
-                return PipeAction{ .send_key = key_map };
+                return .{ .send_key = key_map };
             }
         } else if (std.mem.eql(u8, msg_type.string, "resize")) {
             if (value.array.len < 3) return .none;
@@ -324,7 +328,7 @@ pub const ClientLogic = struct {
                 .integer => |i| @as(u16, @intCast(i)),
                 else => return .none,
             };
-            return PipeAction{ .send_resize = .{ .rows = rows, .cols = cols } };
+            return .{ .send_resize = .{ .rows = rows, .cols = cols } };
         } else if (std.mem.eql(u8, msg_type.string, "quit")) {
             state.should_quit = true;
             return .quit;
@@ -365,12 +369,12 @@ pub const ClientLogic = struct {
                 key_map_kv[4] = .{ .key = .{ .string = "altKey" }, .value = .{ .boolean = key.mods.alt } };
                 key_map_kv[5] = .{ .key = .{ .string = "metaKey" }, .value = .{ .boolean = key.mods.super } };
 
-                const key_map_val = msgpack.Value{ .map = key_map_kv };
+                const key_map_val: msgpack.Value = .{ .map = key_map_kv };
                 var arr = try allocator.alloc(msgpack.Value, 2);
                 arr[0] = .{ .string = event_name };
                 arr[1] = key_map_val;
 
-                const result = try msgpack.encodeFromValue(allocator, msgpack.Value{ .array = arr });
+                const result = try msgpack.encodeFromValue(allocator, .{ .array = arr });
 
                 // Clean up temporary allocations
                 allocator.free(arr);
@@ -499,17 +503,17 @@ pub const App = struct {
         // parser doesn't need init? assuming default init is fine or init(&allocator)
         app.parser = .{};
 
-        std.log.info("Vaxis initialized", .{});
+        log.info("Vaxis initialized", .{});
 
         // Initialize Lua UI
         app.ui = try UI.init(allocator);
-        std.log.info("Lua UI initialized", .{});
+        log.info("Lua UI initialized", .{});
 
         // Create pipe for TTY thread -> Main thread communication
         const fds = try posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
         app.pipe_read_fd = fds[0];
         app.pipe_write_fd = fds[1];
-        std.log.info("Pipe created: read_fd={} write_fd={}", .{ app.pipe_read_fd, app.pipe_write_fd });
+        log.info("Pipe created: read_fd={} write_fd={}", .{ app.pipe_read_fd, app.pipe_write_fd });
 
         return app;
     }
@@ -526,10 +530,10 @@ pub const App = struct {
         if (self.recv_task) |*task| {
             if (self.io_loop) |loop| {
                 task.cancel(loop) catch |err| {
-                    std.log.warn("Failed to cancel recv task: {}", .{err});
+                    log.warn("Failed to cancel recv task: {}", .{err});
                 };
             } else {
-                std.log.warn("deinit: io_loop is null, cannot cancel recv task", .{});
+                log.warn("deinit: io_loop is null, cannot cancel recv task", .{});
             }
             self.recv_task = null;
         }
@@ -537,7 +541,7 @@ pub const App = struct {
         if (self.render_timer) |*task| {
             if (self.io_loop) |loop| {
                 task.cancel(loop) catch |err| {
-                    std.log.warn("Failed to cancel render timer: {}", .{err});
+                    log.warn("Failed to cancel render timer: {}", .{err});
                 };
             }
             self.render_timer = null;
@@ -606,9 +610,9 @@ pub const App = struct {
         });
 
         // Spawn TTY thread to handle vaxis events and forward via pipe
-        std.log.info("Spawning TTY thread...", .{});
+        log.info("Spawning TTY thread...", .{});
         self.tty_thread = try std.Thread.spawn(.{}, ttyThreadFn, .{self});
-        std.log.info("TTY thread spawned", .{});
+        log.info("TTY thread spawned", .{});
 
         // Send terminal queries to detect capabilities
         try self.vx.queryTerminalSend(self.tty.writer());
@@ -633,7 +637,7 @@ pub const App = struct {
             fn redrawCb(ctx: *anyopaque) void {
                 const app_ptr: *App = @ptrCast(@alignCast(ctx));
                 app_ptr.scheduleRender() catch |err| {
-                    std.log.err("Failed to schedule render: {}", .{err});
+                    log.err("Failed to schedule render: {}", .{err});
                 };
             }
         }.redrawCb);
@@ -690,23 +694,23 @@ pub const App = struct {
     }
 
     fn ttyThreadFn(self: *App) void {
-        std.log.info("TTY thread started", .{});
+        log.info("TTY thread started", .{});
 
         var buf: [1024]u8 = undefined;
         while (!self.state.should_quit) {
             const n = posix.read(self.tty.fd, &buf) catch |err| {
-                std.log.err("TTY read failed: {}", .{err});
+                log.err("TTY read failed: {}", .{err});
                 break;
             };
             if (n == 0) break; // EOF
 
             // Forward to pipe
             self.writePipeBytes(buf[0..n]) catch |err| {
-                std.log.err("Failed to write to pipe: {}", .{err});
+                log.err("Failed to write to pipe: {}", .{err});
                 break;
             };
         }
-        std.log.info("TTY thread exiting", .{});
+        log.info("TTY thread exiting", .{});
     }
 
     fn writePipeBytes(self: *App, data: []const u8) !void {
@@ -729,7 +733,7 @@ pub const App = struct {
         switch (completion.result) {
             .read => |bytes_read| {
                 if (bytes_read == 0) {
-                    std.log.warn("Pipe closed", .{});
+                    log.warn("Pipe closed", .{});
                     return;
                 }
 
@@ -766,14 +770,14 @@ pub const App = struct {
                 }
             },
             .err => |err| {
-                std.log.err("Pipe recv failed: {}", .{err});
+                log.err("Pipe recv failed: {}", .{err});
             },
             else => unreachable,
         }
     }
 
     fn handleVaxisEvent(self: *App, event: vaxis.Event) !void {
-        std.log.debug("handleVaxisEvent: {s}", .{@tagName(event)});
+        log.debug("handleVaxisEvent: {s}", .{@tagName(event)});
 
         // Handle mouse events specially - do hit testing and convert to MouseEvent
         if (event == .mouse) {
@@ -801,7 +805,7 @@ pub const App = struct {
                         .ratio = new_ratio,
                     } }) catch |err| {
                         if (err != error.NoUpdateFunction) {
-                            std.log.err("Lua UI update failed: {}", .{err});
+                            log.err("Lua UI update failed: {}", .{err});
                         }
                     };
 
@@ -821,7 +825,7 @@ pub const App = struct {
                         .ratio = new_ratio,
                     } }) catch |err| {
                         if (err != error.NoUpdateFunction) {
-                            std.log.err("Lua UI update failed: {}", .{err});
+                            log.err("Lua UI update failed: {}", .{err});
                         }
                     };
                 }
@@ -882,7 +886,7 @@ pub const App = struct {
 
                 self.ui.update(.{ .mouse = mouse_event }) catch |err| {
                     if (err != error.NoUpdateFunction) {
-                        std.log.err("Lua UI update failed: {}", .{err});
+                        log.err("Lua UI update failed: {}", .{err});
                     }
                 };
             }
@@ -893,7 +897,7 @@ pub const App = struct {
         self.ui.update(.{ .vaxis = event }) catch |err| {
             // Ignore NoUpdateFunction, log others
             if (err != error.NoUpdateFunction) {
-                std.log.err("Lua UI update failed: {}", .{err});
+                log.err("Lua UI update failed: {}", .{err});
             }
         };
 
@@ -905,7 +909,7 @@ pub const App = struct {
                     key.mods.shift and
                     !self.vx.queries_done.load(.unordered))
                 {
-                    std.log.info("explicit width capability detected", .{});
+                    log.info("explicit width capability detected", .{});
                     self.vx.caps.explicit_width = true;
                     self.vx.caps.unicode = .unicode;
                     self.vx.screen.width_method = .unicode;
@@ -917,7 +921,7 @@ pub const App = struct {
                     key.mods.alt and
                     !self.vx.queries_done.load(.unordered))
                 {
-                    std.log.info("scaled text capability detected", .{});
+                    log.info("scaled text capability detected", .{});
                     self.vx.caps.scaled_text = true;
                     return;
                 }
@@ -938,34 +942,34 @@ pub const App = struct {
                 }
             },
             .cap_kitty_keyboard => {
-                std.log.info("kitty keyboard capability detected", .{});
+                log.info("kitty keyboard capability detected", .{});
                 self.vx.caps.kitty_keyboard = true;
             },
             .cap_kitty_graphics => {
                 if (!self.vx.caps.kitty_graphics) {
-                    std.log.info("kitty graphics capability detected", .{});
+                    log.info("kitty graphics capability detected", .{});
                     self.vx.caps.kitty_graphics = true;
                 }
             },
             .cap_rgb => {
-                std.log.info("rgb capability detected", .{});
+                log.info("rgb capability detected", .{});
                 self.vx.caps.rgb = true;
             },
             .cap_unicode => {
-                std.log.info("unicode capability detected", .{});
+                log.info("unicode capability detected", .{});
                 self.vx.caps.unicode = .unicode;
                 self.vx.screen.width_method = .unicode;
             },
             .cap_sgr_pixels => {
-                std.log.info("pixel mouse capability detected", .{});
+                log.info("pixel mouse capability detected", .{});
                 self.vx.caps.sgr_pixels = true;
             },
             .cap_color_scheme_updates => {
-                std.log.info("color_scheme_updates capability detected", .{});
+                log.info("color_scheme_updates capability detected", .{});
                 self.vx.caps.color_scheme_updates = true;
             },
             .cap_multi_cursor => {
-                std.log.info("multi cursor capability detected", .{});
+                log.info("multi cursor capability detected", .{});
                 self.vx.caps.multi_cursor = true;
             },
             .cap_da1 => {
@@ -975,12 +979,12 @@ pub const App = struct {
                 try self.vx.setMouseMode(self.tty.writer(), true);
                 // Send init event
                 self.ui.update(.init) catch |err| {
-                    std.log.err("Failed to update UI with init: {}", .{err});
+                    log.err("Failed to update UI with init: {}", .{err});
                 };
 
                 if (!self.connected) {
                     if (self.io_loop) |loop| {
-                        std.log.info("Initiating connection to {s} (da1 received)", .{self.socket_path});
+                        log.info("Initiating connection to {s} (da1 received)", .{self.socket_path});
                         _ = try connectUnixSocket(loop, self.socket_path, .{
                             .ptr = self,
                             .cb = App.onConnected,
@@ -990,7 +994,7 @@ pub const App = struct {
             },
             .color_report => |report| {
                 const color: vaxis.Cell.Color = .{ .rgb = report.value };
-                std.log.debug("Received color report: kind={any} color={any}", .{ report.kind, color });
+                log.debug("Received color report: kind={any} color={any}", .{ report.kind, color });
                 switch (report.kind) {
                     .fg => self.colors.fg = color,
                     .bg => self.colors.bg = color,
@@ -1005,30 +1009,30 @@ pub const App = struct {
     }
 
     fn updateSurfaceSize(self: *App, pty_id: u32, rows: u16, cols: u16) void {
-        std.log.info("Updating surface size to {}x{}", .{ cols, rows });
+        log.info("Updating surface size to {}x{}", .{ cols, rows });
 
         // Create or resize surface
         if (self.surfaces.get(pty_id)) |surface| {
             surface.resize(rows, cols) catch |err| {
-                std.log.err("Failed to resize surface: {}", .{err});
+                log.err("Failed to resize surface: {}", .{err});
             };
         } else {
             const surface = self.allocator.create(Surface) catch |err| {
-                std.log.err("Failed to allocate surface: {}", .{err});
+                log.err("Failed to allocate surface: {}", .{err});
                 return;
             };
             surface.* = Surface.init(self.allocator, pty_id, rows, cols) catch |err| {
-                std.log.err("Failed to create surface: {}", .{err});
+                log.err("Failed to create surface: {}", .{err});
                 self.allocator.destroy(surface);
                 return;
             };
             self.surfaces.put(pty_id, surface) catch |err| {
-                std.log.err("Failed to store surface: {}", .{err});
+                log.err("Failed to store surface: {}", .{err});
                 surface.deinit();
                 self.allocator.destroy(surface);
                 return;
             };
-            std.log.info("Surface initialized: {}x{}", .{ cols, rows });
+            log.info("Surface initialized: {}x{}", .{ cols, rows });
         }
     }
 
@@ -1052,11 +1056,11 @@ pub const App = struct {
         defer self.allocator.free(msg);
 
         try self.sendDirect(msg);
-        std.log.info("Sent resize request id={} for pty={} to {}x{} ({}x{}px)", .{ msgid, pty_id, cols, rows, width_px, height_px });
+        log.info("Sent resize request id={} for pty={} to {}x{} ({}x{}px)", .{ msgid, pty_id, cols, rows, width_px, height_px });
     }
 
     pub fn handleRedraw(self: *App, params: msgpack.Value) !void {
-        std.log.debug("handleRedraw: received redraw params", .{});
+        log.debug("handleRedraw: received redraw params", .{});
         if (params != .array) return;
 
         // Find PTY ID from events
@@ -1086,14 +1090,14 @@ pub const App = struct {
                 // Check if we got a flush event - if so, swap and render
                 const should_flush = ClientLogic.shouldFlush(params);
                 if (should_flush) {
-                    std.log.debug("handleRedraw: flush event received for pty {}, rendering", .{pid});
+                    log.debug("handleRedraw: flush event received for pty {}, rendering", .{pid});
                     try self.scheduleRender();
                 }
             } else {
-                std.log.warn("handleRedraw: no surface for pty {}, ignoring redraw", .{pid});
+                log.warn("handleRedraw: no surface for pty {}, ignoring redraw", .{pid});
             }
         } else {
-            std.log.debug("handleRedraw: could not determine pty_id from events", .{});
+            log.debug("handleRedraw: could not determine pty_id from events", .{});
         }
     }
 
@@ -1102,7 +1106,7 @@ pub const App = struct {
             .surface => |surf| {
                 if (self.surfaces.get(surf.pty_id)) |surface| {
                     // Check if we need to resize the PTY
-                    std.log.debug("renderWidget surface: pty={} widget={}x{} surface={}x{}", .{
+                    log.debug("renderWidget surface: pty={} widget={}x{} surface={}x{}", .{
                         surf.pty_id,
                         w.width,
                         w.height,
@@ -1110,9 +1114,9 @@ pub const App = struct {
                         surface.rows,
                     });
                     if (w.width != surface.cols or w.height != surface.rows) {
-                        std.log.info("renderWidget: size mismatch for pty={}, sending resize", .{surf.pty_id});
+                        log.info("renderWidget: size mismatch for pty={}, sending resize", .{surf.pty_id});
                         self.sendResize(surf.pty_id, w.height, w.width) catch |err| {
-                            std.log.err("Failed to send resize: {}", .{err});
+                            log.err("Failed to send resize: {}", .{err});
                         };
                     }
                     // Calculate dim factor based on focus
@@ -1178,7 +1182,7 @@ pub const App = struct {
                 const start = list.scroll_offset;
                 const end = @min(start + visible_rows, list.items.len);
 
-                std.log.debug("render list: items={} height={} start={} end={}", .{ list.items.len, w.height, start, end });
+                log.debug("render list: items={} height={} start={} end={}", .{ list.items.len, w.height, start, end });
 
                 for (start..end) |i| {
                     const row: u16 = @intCast(i - start);
@@ -1206,7 +1210,17 @@ pub const App = struct {
                 const chars = b.borderChars();
                 const style = b.style;
 
-                std.log.debug("render box: w={} h={}", .{ win.width, win.height });
+                log.debug("render box: w={} h={}", .{ win.width, win.height });
+
+                // Fill the entire box with background color
+                for (0..win.height) |row| {
+                    for (0..win.width) |col| {
+                        win.writeCell(@intCast(col), @intCast(row), .{
+                            .char = .{ .grapheme = " ", .width = 1 },
+                            .style = style,
+                        });
+                    }
+                }
 
                 if (b.border != .none and win.width >= 2 and win.height >= 2) {
                     win.writeCell(0, 0, .{ .char = .{ .grapheme = chars.tl, .width = 1 }, .style = style });
@@ -1236,6 +1250,15 @@ pub const App = struct {
                     .height = b.child.height,
                 });
                 try self.renderWidget(b.child.*, child_win);
+            },
+            .padding => |p| {
+                const child_win = win.child(.{
+                    .x_off = p.child.x,
+                    .y_off = p.child.y,
+                    .width = p.child.width,
+                    .height = p.child.height,
+                });
+                try self.renderWidget(p.child.*, child_win);
             },
             .column => |col| {
                 for (col.children) |child| {
@@ -1308,20 +1331,20 @@ pub const App = struct {
         _ = loop;
         const app = completion.userdataCast(App);
         app.render() catch |err| {
-            std.log.err("Failed to render frame: {}", .{err});
+            log.err("Failed to render frame: {}", .{err});
         };
         app.render_timer = null;
     }
 
     pub fn render(self: *App) !void {
-        std.log.debug("render: starting render", .{});
+        log.debug("render: starting render", .{});
 
         const win = self.vx.window();
         win.hideCursor();
         win.clear();
 
         var root_widget = self.ui.view() catch |err| {
-            std.log.err("Failed to get view from UI: {}", .{err});
+            log.err("Failed to get view from UI: {}", .{err});
             return;
         };
         defer root_widget.deinit(self.allocator);
@@ -1353,9 +1376,9 @@ pub const App = struct {
         try self.renderWidget(w, win);
 
         // Log cursor state after render
-        std.log.info("App.render: cursor_vis={}", .{screen.cursor_vis});
+        log.info("App.render: cursor_vis={}", .{screen.cursor_vis});
 
-        std.log.debug("render: calling vx.render()", .{});
+        log.debug("render: calling vx.render()", .{});
         if (self.state.pty_id) |pid_i64| {
             const pid = @as(u32, @intCast(pid_i64));
             if (self.surfaces.get(pid)) |surface| {
@@ -1363,9 +1386,9 @@ pub const App = struct {
             }
         }
         try self.vx.render(self.tty.writer());
-        std.log.debug("render: flushing tty", .{});
+        log.debug("render: flushing tty", .{});
         try self.tty.tty_writer.interface.flush();
-        std.log.debug("render: complete", .{});
+        log.debug("render: complete", .{});
 
         self.last_render_time = std.time.milliTimestamp();
     }
@@ -1377,7 +1400,7 @@ pub const App = struct {
             .socket => |fd| {
                 app.fd = fd;
                 app.connected = true;
-                std.log.info("Connected! fd={}", .{app.fd});
+                log.info("Connected! fd={}", .{app.fd});
 
                 if (!app.state.should_quit) {
                     // Start receiving from the server
@@ -1400,7 +1423,7 @@ pub const App = struct {
 
                         var params_kv = try app.allocator.alloc(msgpack.Value.KeyValue, 3);
                         defer app.allocator.free(params_kv);
-                        std.log.info("Sending spawn_pty: rows={} cols={}", .{ ws.rows, ws.cols });
+                        log.info("Sending spawn_pty: rows={} cols={}", .{ ws.rows, ws.cols });
                         params_kv[0] = .{ .key = .{ .string = "rows" }, .value = .{ .unsigned = ws.rows } };
                         params_kv[1] = .{ .key = .{ .string = "cols" }, .value = .{ .unsigned = ws.cols } };
                         params_kv[2] = .{ .key = .{ .string = "attach" }, .value = .{ .boolean = true } };
@@ -1419,14 +1442,14 @@ pub const App = struct {
                         });
                     }
                 } else {
-                    std.log.info("Connected but should_quit=true, not sending spawn_pty", .{});
+                    log.info("Connected but should_quit=true, not sending spawn_pty", .{});
                 }
             },
             .err => |err| {
                 if (err == error.ConnectionRefused) {
                     app.state.connection_refused = true;
                 } else {
-                    std.log.err("Connection failed: {}", .{err});
+                    log.err("Connection failed: {}", .{err});
                 }
             },
             else => unreachable,
@@ -1443,7 +1466,7 @@ pub const App = struct {
         defer self.allocator.free(path);
 
         const file = std.fs.openFileAbsolute(path, .{}) catch |err| {
-            std.log.err("Failed to open session file {s}: {}", .{ path, err });
+            log.err("Failed to open session file {s}: {}", .{ path, err });
             return err;
         };
         defer file.close();
@@ -1453,13 +1476,13 @@ pub const App = struct {
 
         const pty_ids = try extractPtyIdsFromJson(self.allocator, json);
         if (pty_ids.len == 0) {
-            std.log.err("No PTY IDs found in session", .{});
+            log.err("No PTY IDs found in session", .{});
             self.allocator.free(json);
             self.session_json = null;
             return error.NoSessionsFound;
         }
 
-        std.log.info("Attaching to {} PTYs from session {s}", .{ pty_ids.len, session_name });
+        log.info("Attaching to {} PTYs from session {s}", .{ pty_ids.len, session_name });
         self.pending_attach_ids = pty_ids;
         self.pending_attach_count = pty_ids.len;
 
@@ -1499,7 +1522,7 @@ pub const App = struct {
         switch (completion.result) {
             .send => {},
             .err => |err| {
-                std.log.err("Send failed: {}", .{err});
+                log.err("Send failed: {}", .{err});
             },
             else => unreachable,
         }
@@ -1513,7 +1536,7 @@ pub const App = struct {
         switch (completion.result) {
             .recv => |initial_bytes_read| {
                 if (initial_bytes_read == 0) {
-                    std.log.info("Server closed connection", .{});
+                    log.info("Server closed connection", .{});
                     return;
                 }
 
@@ -1542,7 +1565,7 @@ pub const App = struct {
 
                         switch (action) {
                             .send_attach => |pty_id| {
-                                std.log.info("Sending attach_pty for session {}", .{pty_id});
+                                log.info("Sending attach_pty for session {}", .{pty_id});
                                 app.send_buffer = try msgpack.encode(app.allocator, .{ 0, @intFromEnum(MsgId.attach_pty), "attach_pty", .{pty_id} });
                                 _ = try l.send(app.fd, app.send_buffer.?, .{
                                     .ptr = app,
@@ -1551,28 +1574,28 @@ pub const App = struct {
                             },
                             .redraw => |params| {
                                 app.handleRedraw(params) catch |err| {
-                                    std.log.err("Failed to handle redraw: {}", .{err});
+                                    log.err("Failed to handle redraw: {}", .{err});
                                 };
                             },
                             .attached => |id_i64| {
-                                std.log.info("Attached to session, checking for resize", .{});
+                                log.info("Attached to session, checking for resize", .{});
                                 const pty_id = @as(u32, @intCast(id_i64));
 
                                 // Ensure surface exists
                                 if (!app.surfaces.contains(pty_id)) {
                                     const ws = try vaxis.Tty.getWinsize(app.tty.fd);
-                                    std.log.info("Creating surface for attached session {}: {}x{}", .{ pty_id, ws.rows, ws.cols });
+                                    log.info("Creating surface for attached session {}: {}x{}", .{ pty_id, ws.rows, ws.cols });
                                     const surface = app.allocator.create(Surface) catch |err| {
-                                        std.log.err("Failed to allocate surface: {}", .{err});
+                                        log.err("Failed to allocate surface: {}", .{err});
                                         return error.SurfaceInitFailed;
                                     };
                                     surface.* = Surface.init(app.allocator, pty_id, ws.rows, ws.cols) catch |err| {
-                                        std.log.err("Failed to create surface: {}", .{err});
+                                        log.err("Failed to create surface: {}", .{err});
                                         app.allocator.destroy(surface);
                                         return error.SurfaceInitFailed;
                                     };
                                     app.surfaces.put(pty_id, surface) catch |err| {
-                                        std.log.err("Failed to store surface: {}", .{err});
+                                        log.err("Failed to store surface: {}", .{err});
                                         surface.deinit();
                                         app.allocator.destroy(surface);
                                         return error.SurfaceInitFailed;
@@ -1583,7 +1606,7 @@ pub const App = struct {
                                     // Skip pty_attach events during session restore - set_state will restore the UI tree
                                     const is_session_restore = app.pending_attach_count > 0 or app.session_json != null;
                                     if (!is_session_restore) {
-                                        std.log.info("Updating UI with pty_attach for {}", .{pty_id});
+                                        log.info("Updating UI with pty_attach for {}", .{pty_id});
                                         // Send pty_attach event to Lua UI
                                         app.ui.update(.{
                                             .pty_attach = .{
@@ -1602,7 +1625,7 @@ pub const App = struct {
                                                         key_map_kv[4] = .{ .key = .{ .string = "altKey" }, .value = .{ .boolean = key.alt } };
                                                         key_map_kv[5] = .{ .key = .{ .string = "metaKey" }, .value = .{ .boolean = key.super } };
 
-                                                        const key_map_val = msgpack.Value{ .map = key_map_kv };
+                                                        const key_map_val: msgpack.Value = .{ .map = key_map_kv };
 
                                                         var params = try self.allocator.alloc(msgpack.Value, 2);
                                                         params[0] = .{ .unsigned = @intCast(id) };
@@ -1639,7 +1662,7 @@ pub const App = struct {
                                                         mouse_map_kv[5] = .{ .key = .{ .string = "ctrlKey" }, .value = .{ .boolean = mouse.ctrl } };
                                                         mouse_map_kv[6] = .{ .key = .{ .string = "altKey" }, .value = .{ .boolean = mouse.alt } };
 
-                                                        const mouse_map_val = msgpack.Value{ .map = mouse_map_kv };
+                                                        const mouse_map_val: msgpack.Value = .{ .map = mouse_map_kv };
 
                                                         var params = try self.allocator.alloc(msgpack.Value, 2);
                                                         params[0] = .{ .unsigned = @intCast(id) };
@@ -1688,13 +1711,13 @@ pub const App = struct {
                                                 }.appClosePty,
                                             },
                                         }) catch |err| {
-                                            std.log.err("Failed to update UI with pty_attach: {}", .{err});
+                                            log.err("Failed to update UI with pty_attach: {}", .{err});
                                         };
                                     }
 
                                     const width_px = @as(u16, surface.cols) * app.cell_width_px;
                                     const height_px = @as(u16, surface.rows) * app.cell_height_px;
-                                    std.log.info("Sending initial resize: {}x{} ({}x{}px, cell={}x{})", .{ surface.rows, surface.cols, width_px, height_px, app.cell_width_px, app.cell_height_px });
+                                    log.info("Sending initial resize: {}x{} ({}x{}px, cell={}x{})", .{ surface.rows, surface.cols, width_px, height_px, app.cell_width_px, app.cell_height_px });
                                     const resize_msg = try msgpack.encode(app.allocator, .{
                                         2, // notification
                                         "resize_pty",
@@ -1707,10 +1730,10 @@ pub const App = struct {
                                     if (app.pending_attach_count > 0) {
                                         app.pending_attach_count -= 1;
                                         if (app.pending_attach_count == 0) {
-                                            std.log.info("All PTYs attached, restoring session state", .{});
+                                            log.info("All PTYs attached, restoring session state", .{});
                                             if (app.session_json) |json| {
                                                 app.ui.setStateFromJson(json, ptyLookup, app) catch |err| {
-                                                    std.log.err("Failed to restore session state: {}", .{err});
+                                                    log.err("Failed to restore session state: {}", .{err});
                                                 };
                                                 app.allocator.free(json);
                                                 app.session_json = null;
@@ -1725,13 +1748,13 @@ pub const App = struct {
                                 }
                             },
                             .pty_exited => |info| {
-                                std.log.info("PTY {} exited with status {}", .{ info.pty_id, info.status });
+                                log.info("PTY {} exited with status {}", .{ info.pty_id, info.status });
                                 app.ui.update(.{ .pty_exited = .{ .id = info.pty_id, .status = info.status } }) catch |err| {
-                                    std.log.err("Failed to update UI with pty_exited: {}", .{err});
+                                    log.err("Failed to update UI with pty_exited: {}", .{err});
                                 };
                             },
                             .detached => {
-                                std.log.info("Detach complete, closing connection", .{});
+                                log.info("Detach complete, closing connection", .{});
                                 app.state.should_quit = true;
                                 if (app.connected) {
                                     posix.close(app.fd);
@@ -1757,7 +1780,7 @@ pub const App = struct {
                     };
 
                     if (n == 0) {
-                        std.log.info("Server closed connection", .{});
+                        log.info("Server closed connection", .{});
                         return;
                     }
                     current_bytes_read = n;
@@ -1772,8 +1795,8 @@ pub const App = struct {
                 }
             },
             .err => |err| {
-                std.log.err("Recv failed: {}", .{err});
-                std.log.info("NOT resubmitting recv after error", .{});
+                log.err("Recv failed: {}", .{err});
+                log.info("NOT resubmitting recv after error", .{});
                 // Don't resubmit on error - let it drain
             },
             else => unreachable,
@@ -1792,7 +1815,7 @@ pub const App = struct {
         const msgid = self.state.next_msgid;
         self.state.next_msgid += 1;
 
-        std.log.info("spawnPty: sending request msgid={}", .{msgid});
+        log.info("spawnPty: sending request msgid={}", .{msgid});
         try self.state.pending_requests.put(msgid, .spawn);
 
         // Manually construct map for spawn params
@@ -1842,7 +1865,7 @@ pub const App = struct {
         defer file.close();
 
         try file.writeAll(json);
-        std.log.info("Session saved to {s}", .{path});
+        log.info("Session saved to {s}", .{path});
     }
 
     pub fn loadSession(self: *App, name: []const u8) !void {
@@ -1855,7 +1878,7 @@ pub const App = struct {
         defer self.allocator.free(path);
 
         const file = std.fs.openFileAbsolute(path, .{}) catch |err| {
-            std.log.err("Failed to open session file {s}: {}", .{ path, err });
+            log.err("Failed to open session file {s}: {}", .{ path, err });
             return err;
         };
         defer file.close();
@@ -1864,7 +1887,7 @@ pub const App = struct {
         defer self.allocator.free(json);
 
         try self.ui.setStateFromJson(json, ptyLookup, self);
-        std.log.info("Session loaded from {s}", .{path});
+        log.info("Session loaded from {s}", .{path});
     }
 
     fn extractPtyIdsFromJson(allocator: std.mem.Allocator, json: []const u8) ![]u32 {
@@ -1924,7 +1947,7 @@ pub const App = struct {
                     key_map_kv[4] = .{ .key = .{ .string = "altKey" }, .value = .{ .boolean = key.alt } };
                     key_map_kv[5] = .{ .key = .{ .string = "metaKey" }, .value = .{ .boolean = key.super } };
 
-                    const key_map_val = msgpack.Value{ .map = key_map_kv };
+                    const key_map_val: msgpack.Value = .{ .map = key_map_kv };
 
                     var params = try app.allocator.alloc(msgpack.Value, 2);
                     params[0] = .{ .unsigned = @intCast(pty_id) };
@@ -1960,7 +1983,7 @@ pub const App = struct {
                     mouse_map_kv[5] = .{ .key = .{ .string = "ctrlKey" }, .value = .{ .boolean = mouse.ctrl } };
                     mouse_map_kv[6] = .{ .key = .{ .string = "altKey" }, .value = .{ .boolean = mouse.alt } };
 
-                    const mouse_map_val = msgpack.Value{ .map = mouse_map_kv };
+                    const mouse_map_val: msgpack.Value = .{ .map = mouse_map_kv };
 
                     var params = try app.allocator.alloc(msgpack.Value, 2);
                     params[0] = .{ .unsigned = @intCast(pty_id) };
@@ -2160,11 +2183,11 @@ test "ClientLogic - processPipeMessage" {
         key_map_kv[3] = .{ .key = .{ .string = "altKey" }, .value = .{ .boolean = false } };
         key_map_kv[4] = .{ .key = .{ .string = "metaKey" }, .value = .{ .boolean = false } };
 
-        const key_map_val = msgpack.Value{ .map = key_map_kv };
+        const key_map_val: msgpack.Value = .{ .map = key_map_kv };
         var arr = try allocator.alloc(msgpack.Value, 2);
         arr[0] = .{ .string = "key" };
         arr[1] = key_map_val;
-        const encoded = try msgpack.encodeFromValue(allocator, msgpack.Value{ .array = arr });
+        const encoded = try msgpack.encodeFromValue(allocator, .{ .array = arr });
         defer allocator.free(encoded);
 
         const key_val = try msgpack.decode(allocator, encoded);
@@ -2210,7 +2233,7 @@ test "ClientLogic - shouldFlush" {
         const events = try allocator.alloc(msgpack.Value, 1);
         events[0] = flush_val;
 
-        const params = msgpack.Value{ .array = events };
+        const params: msgpack.Value = .{ .array = events };
         defer allocator.free(events);
 
         try testing.expect(ClientLogic.shouldFlush(params));
@@ -2227,7 +2250,7 @@ test "ClientLogic - shouldFlush" {
         const events = try allocator.alloc(msgpack.Value, 1);
         events[0] = other_val;
 
-        const params = msgpack.Value{ .array = events };
+        const params: msgpack.Value = .{ .array = events };
         defer allocator.free(events);
 
         try testing.expect(!ClientLogic.shouldFlush(params));
@@ -2236,7 +2259,7 @@ test "ClientLogic - shouldFlush" {
     // Test empty events
     {
         const events = try allocator.alloc(msgpack.Value, 0);
-        const params = msgpack.Value{ .array = events };
+        const params: msgpack.Value = .{ .array = events };
         defer allocator.free(events);
 
         try testing.expect(!ClientLogic.shouldFlush(params));

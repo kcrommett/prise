@@ -1,7 +1,13 @@
+//! io_uring-based I/O backend for Linux.
+
 const std = @import("std");
-const posix = std.posix;
-const linux = std.os.linux;
+
 const root = @import("../io.zig");
+
+const linux = std.os.linux;
+const posix = std.posix;
+
+const log = std.log.scoped(.io_uring);
 
 pub const Loop = struct {
     allocator: std.mem.Allocator,
@@ -192,7 +198,7 @@ pub const Loop = struct {
         const id = self.next_id;
         self.next_id += 1;
 
-        const ts = linux.kernel_timespec{
+        const ts: linux.kernel_timespec = .{
             .sec = @intCast(nanoseconds / std.time.ns_per_s),
             .nsec = @intCast(nanoseconds % std.time.ns_per_s),
         };
@@ -224,7 +230,7 @@ pub const Loop = struct {
     }
 
     pub fn cancelByFd(self: *Loop, fd: posix.socket_t) void {
-        var ids_to_cancel = std.ArrayList(usize){};
+        var ids_to_cancel: std.ArrayList(usize) = .{};
         defer ids_to_cancel.deinit(self.allocator);
 
         var it = self.pending.iterator();
@@ -378,7 +384,7 @@ test "io_uring loop - init" {
         // In a real CI environment with Linux, this should preferably fail if it's expected to work.
         // But for local dev on mixed systems, this safety is good.
         // However, std.os.linux.IoUring.init might throw various errors.
-        std.log.warn("Failed to init io_uring: {}", .{err});
+        log.warn("Failed to init io_uring: {}", .{err});
         return;
     };
     defer loop.deinit();
@@ -393,7 +399,7 @@ test "io_uring loop - timeout" {
     const State = struct {
         completed: *bool,
     };
-    var state = State{
+    var state: State = .{
         .completed = &completed,
     };
 
@@ -448,13 +454,13 @@ test "io_uring loop - socket/connect/accept/recv/send/close" {
         close_client_done: bool = false,
         close_accepted_done: bool = false,
     };
-    var state = State{};
+    var state: State = .{};
 
     const Context = struct {
         state: *State,
         addr: *std.net.Address,
     };
-    var ctx_struct = Context{ .state = &state, .addr = &addr };
+    var ctx_struct: Context = .{ .state = &state, .addr = &addr };
 
     const Handlers = struct {
         fn close_accepted_cb(_: *root.Loop, completion: root.Completion) !void {
@@ -591,7 +597,7 @@ test "io_uring loop - cancel" {
     const State = struct {
         canceled: *bool,
     };
-    var state = State{ .canceled = &canceled };
+    var state: State = .{ .canceled = &canceled };
 
     const cb = struct {
         fn cb(l: *root.Loop, completion: root.Completion) !void {
@@ -631,7 +637,7 @@ test "io_uring loop - cancelByFd" {
     const State = struct {
         canceled: *bool,
     };
-    var state = State{ .canceled = &canceled };
+    var state: State = .{ .canceled = &canceled };
 
     const cb = struct {
         fn cb(l: *root.Loop, completion: root.Completion) !void {

@@ -1,7 +1,11 @@
+//! kqueue-based I/O backend for macOS and BSD.
+
 const std = @import("std");
-const posix = std.posix;
-const c = std.c;
+
 const root = @import("../io.zig");
+
+const c = std.c;
+const posix = std.posix;
 
 pub const Loop = struct {
     allocator: std.mem.Allocator,

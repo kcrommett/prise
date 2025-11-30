@@ -12,7 +12,7 @@ zigdoc ghostty-vt.Terminal
 zigdoc vaxis.Window
 ```
 
-## Code Style
+## Zig Code Style
 
 **Naming:**
 - `camelCase` for functions and methods
@@ -39,6 +39,23 @@ const foo = Type{ .field = value };     // Avoid
 **Documentation:** Use `///` for public API, `//` for implementation notes
 
 **Tests:** Inline in the same file, register in src/main.zig test block
+
+## Lua Code Style
+
+**Naming:**
+- `snake_case` for functions, variables, and parameters
+- `PascalCase` for module names and classes
+- `SCREAMING_SNAKE_CASE` for constants
+
+**Formatting:** Use StyLua for automatic formatting (configured in `.stylua.toml`)
+
+**Modules:** Use `local M = {}` pattern with `return M` at the end
+
+**Variables:** Declare all variables as `local` at the top of modules/functions; never use globals
+
+**Documentation:** Use `---` comments for function documentation
+
+**Type annotations:** Use EmmyLua-style annotations everywhere (e.g., `---@param name type`, `---@return type`, `---@class ClassName`)
 
 ## Build Commands
 

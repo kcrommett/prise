@@ -1,3 +1,7 @@
+//! Keyboard input encoding for terminal protocols.
+
+const std = @import("std");
+
 const ghostty = @import("ghostty-vt");
 
 pub fn encode(
@@ -11,7 +15,6 @@ pub fn encode(
 }
 
 test "encode key" {
-    const std = @import("std");
     var buf: [32]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
 

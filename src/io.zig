@@ -1,5 +1,8 @@
+//! Async I/O abstraction layer with platform-specific backends.
+
 const std = @import("std");
 const builtin = @import("builtin");
+
 const posix = std.posix;
 
 const backend = if (builtin.is_test)

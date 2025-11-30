@@ -1,15 +1,22 @@
+//! Server that manages PTY sessions and client connections.
+
 const std = @import("std");
+
+const ghostty_vt = @import("ghostty-vt");
+
 const io = @import("io.zig");
-const rpc = @import("rpc.zig");
+const key_encode = @import("key_encode.zig");
+const key_parse = @import("key_parse.zig");
+const mouse_encode = @import("mouse_encode.zig");
 const msgpack = @import("msgpack.zig");
 const pty = @import("pty.zig");
-const key_parse = @import("key_parse.zig");
-const key_encode = @import("key_encode.zig");
-const mouse_encode = @import("mouse_encode.zig");
-const posix = std.posix;
-const ghostty_vt = @import("ghostty-vt");
-const vt_handler = @import("vt_handler.zig");
 const redraw = @import("redraw.zig");
+const rpc = @import("rpc.zig");
+const vt_handler = @import("vt_handler.zig");
+
+const posix = std.posix;
+
+const log = std.log.scoped(.server);
 
 var signal_write_fd: posix.fd_t = undefined;
 
@@ -176,7 +183,7 @@ const Pty = struct {
             fn writeToPty(ctx: ?*anyopaque, data: []const u8) !void {
                 const pty_inst: *Pty = @ptrCast(@alignCast(ctx));
                 _ = posix.write(pty_inst.process.master, data) catch |err| {
-                    std.log.err("Failed to write to PTY: {}", .{err});
+                    log.err("Failed to write to PTY: {}", .{err});
                     return err;
                 };
             }
@@ -187,7 +194,7 @@ const Pty = struct {
             fn onTitle(ctx: ?*anyopaque, title: []const u8) !void {
                 const pty_inst: *Pty = @ptrCast(@alignCast(ctx));
                 pty_inst.setTitle(title) catch |err| {
-                    std.log.err("Failed to set title: {}", .{err});
+                    log.err("Failed to set title: {}", .{err});
                 };
             }
         }.onTitle);
@@ -205,7 +212,7 @@ const Pty = struct {
             while (true) {
                 const n = posix.read(self.process.master, &buffer) catch |err| {
                     if (err == error.WouldBlock) break; // Buffer empty, time to poll
-                    std.log.err("PTY read error: {}", .{err});
+                    log.err("PTY read error: {}", .{err});
                     self.running.store(false, .seq_cst);
                     break;
                 };
@@ -218,7 +225,7 @@ const Pty = struct {
                 self.terminal_mutex.lock();
                 // Parse the data through ghostty-vt to update terminal state
                 stream.nextSlice(buffer[0..n]) catch |err| {
-                    std.log.err("Failed to parse VT sequences: {}", .{err});
+                    log.err("Failed to parse VT sequences: {}", .{err});
                 };
                 self.terminal_mutex.unlock();
 
@@ -227,7 +234,7 @@ const Pty = struct {
                 if (!self.terminal.modes.get(.synchronized_output)) {
                     _ = posix.write(self.pipe_fds[1], "x") catch |err| {
                         if (err != error.WouldBlock) {
-                            std.log.err("Failed to signal dirty: {}", .{err});
+                            log.err("Failed to signal dirty: {}", .{err});
                         }
                     };
                 }
@@ -237,17 +244,17 @@ const Pty = struct {
 
             // Poll for more data or exit signal
             _ = posix.poll(&poll_fds, -1) catch |err| {
-                std.log.err("Poll error: {}", .{err});
+                log.err("Poll error: {}", .{err});
                 break;
             };
 
             if (poll_fds[1].revents & posix.POLL.IN != 0) break; // Exit signal received
         }
-        std.log.info("PTY read thread exiting for PTY {}", .{self.id});
+        log.info("PTY read thread exiting for PTY {}", .{self.id});
 
         // Reap the child process
         const result = posix.waitpid(self.process.pid, 0);
-        std.log.info("PTY {} process {} exited with status {}", .{ self.id, self.process.pid, result.status });
+        log.info("PTY {} process {} exited with status {}", .{ self.id, self.process.pid, result.status });
 
         self.exit_status.store(result.status, .seq_cst);
         self.exited.store(true, .seq_cst);
@@ -670,7 +677,7 @@ const Client = struct {
                 }
             },
             .err => |err| {
-                std.log.err("Send failed: {}", .{err});
+                log.err("Send failed: {}", .{err});
                 // Clear queue on error
                 for (client.send_queue.items) |buf| {
                     client.server.allocator.free(buf);
@@ -716,7 +723,7 @@ const Client = struct {
                             .unsigned => |u| @intCast(u),
                             .integer => |i| @intCast(i),
                             else => {
-                                std.log.warn("write_pty notification: invalid pty_id type", .{});
+                                log.warn("write_pty notification: invalid pty_id type", .{});
                                 return;
                             },
                         };
@@ -725,19 +732,19 @@ const Client = struct {
                         else if (notif.params.array[1] == .string)
                             notif.params.array[1].string
                         else {
-                            std.log.warn("write_pty notification: invalid data type", .{});
+                            log.warn("write_pty notification: invalid data type", .{});
                             return;
                         };
 
                         if (self.server.ptys.get(pty_id)) |pty_instance| {
                             _ = posix.write(pty_instance.process.master, input_data) catch |err| {
-                                std.log.err("Write to PTY failed: {}", .{err});
+                                log.err("Write to PTY failed: {}", .{err});
                             };
                         } else {
-                            std.log.warn("write_pty notification: PTY {} not found", .{pty_id});
+                            log.warn("write_pty notification: PTY {} not found", .{pty_id});
                         }
                     } else {
-                        std.log.warn("write_pty notification: invalid params", .{});
+                        log.warn("write_pty notification: invalid params", .{});
                     }
                 } else if (std.mem.eql(u8, notif.method, "key_input") or std.mem.eql(u8, notif.method, "key_release")) {
                     const is_release = std.mem.eql(u8, notif.method, "key_release");
@@ -746,7 +753,7 @@ const Client = struct {
                             .unsigned => |u| @intCast(u),
                             .integer => |i| @intCast(i),
                             else => {
-                                std.log.warn("key_input notification: invalid pty_id type", .{});
+                                log.warn("key_input notification: invalid pty_id type", .{});
                                 return;
                             },
                         };
@@ -755,7 +762,7 @@ const Client = struct {
                         if (self.server.ptys.get(pty_id)) |pty_instance| {
                             const action: ghostty_vt.input.KeyAction = if (is_release) .release else .press;
                             const key = key_parse.parseKeyMapWithAction(key_map, action) catch |err| {
-                                std.log.err("Failed to parse key map: {}", .{err});
+                                log.err("Failed to parse key map: {}", .{err});
                                 return;
                             };
 
@@ -764,7 +771,7 @@ const Client = struct {
 
                             pty_instance.terminal_mutex.lock();
                             key_encode.encode(&writer, key, &pty_instance.terminal) catch |err| {
-                                std.log.err("Failed to encode key: {}", .{err});
+                                log.err("Failed to encode key: {}", .{err});
                                 pty_instance.terminal_mutex.unlock();
                                 return;
                             };
@@ -773,14 +780,14 @@ const Client = struct {
                             const encoded = writer.buffered();
                             if (encoded.len > 0) {
                                 _ = posix.write(pty_instance.process.master, encoded) catch |err| {
-                                    std.log.err("Write to PTY failed: {}", .{err});
+                                    log.err("Write to PTY failed: {}", .{err});
                                 };
                             }
                         } else {
-                            std.log.warn("key_input notification: PTY {} not found", .{pty_id});
+                            log.warn("key_input notification: PTY {} not found", .{pty_id});
                         }
                     } else {
-                        std.log.warn("key_input notification: invalid params", .{});
+                        log.warn("key_input notification: invalid params", .{});
                     }
                 } else if (std.mem.eql(u8, notif.method, "mouse_input")) {
                     if (notif.params == .array and notif.params.array.len >= 2) {
@@ -788,7 +795,7 @@ const Client = struct {
                             .unsigned => |u| @intCast(u),
                             .integer => |i| @intCast(i),
                             else => {
-                                std.log.warn("mouse_input notification: invalid pty_id type", .{});
+                                log.warn("mouse_input notification: invalid pty_id type", .{});
                                 return;
                             },
                         };
@@ -796,7 +803,7 @@ const Client = struct {
 
                         if (self.server.ptys.get(pty_id)) |pty_instance| {
                             const mouse = key_parse.parseMouseMap(mouse_map) catch |err| {
-                                std.log.err("Failed to parse mouse map: {}", .{err});
+                                log.err("Failed to parse mouse map: {}", .{err});
                                 return;
                             };
 
@@ -827,7 +834,7 @@ const Client = struct {
                                     else
                                         (if (mouse.button == .wheel_up) "\x1b[A" else "\x1b[B");
                                     _ = posix.write(pty_instance.process.master, seq) catch |err| {
-                                        std.log.err("Write to PTY failed: {}", .{err});
+                                        log.err("Write to PTY failed: {}", .{err});
                                     };
                                 } else {
                                     const delta: isize = switch (mouse.button) {
@@ -838,7 +845,7 @@ const Client = struct {
                                     if (delta != 0) {
                                         pty_instance.terminal_mutex.lock();
                                         pty_instance.terminal.scrollViewport(.{ .delta = delta }) catch |err| {
-                                            std.log.err("Failed to scroll viewport: {}", .{err});
+                                            log.err("Failed to scroll viewport: {}", .{err});
                                         };
                                         pty_instance.terminal_mutex.unlock();
                                         _ = posix.write(pty_instance.pipe_fds[1], "x") catch {};
@@ -956,22 +963,22 @@ const Client = struct {
                                 var writer = std.Io.Writer.fixed(&encode_buf);
 
                                 mouse_encode.encode(&writer, mouse, state.terminal) catch |err| {
-                                    std.log.err("Failed to encode mouse: {}", .{err});
+                                    log.err("Failed to encode mouse: {}", .{err});
                                     return;
                                 };
 
                                 const encoded = writer.buffered();
                                 if (encoded.len > 0) {
                                     _ = posix.write(pty_instance.process.master, encoded) catch |err| {
-                                        std.log.err("Write to PTY failed: {}", .{err});
+                                        log.err("Write to PTY failed: {}", .{err});
                                     };
                                 }
                             }
                         } else {
-                            std.log.warn("mouse_input notification: PTY {} not found", .{pty_id});
+                            log.warn("mouse_input notification: PTY {} not found", .{pty_id});
                         }
                     } else {
-                        std.log.warn("mouse_input notification: invalid params", .{});
+                        log.warn("mouse_input notification: invalid params", .{});
                     }
                 } else if (std.mem.eql(u8, notif.method, "resize_pty")) {
                     if (notif.params == .array and notif.params.array.len >= 3) {
@@ -979,7 +986,7 @@ const Client = struct {
                             .unsigned => |u| @intCast(u),
                             .integer => |i| @intCast(i),
                             else => {
-                                std.log.warn("resize_pty notification: invalid pty_id type", .{});
+                                log.warn("resize_pty notification: invalid pty_id type", .{});
                                 return;
                             },
                         };
@@ -987,7 +994,7 @@ const Client = struct {
                             .unsigned => |u| @intCast(u),
                             .integer => |i| @intCast(i),
                             else => {
-                                std.log.warn("resize_pty notification: invalid rows type", .{});
+                                log.warn("resize_pty notification: invalid rows type", .{});
                                 return;
                             },
                         };
@@ -995,7 +1002,7 @@ const Client = struct {
                             .unsigned => |u| @intCast(u),
                             .integer => |i| @intCast(i),
                             else => {
-                                std.log.warn("resize_pty notification: invalid cols type", .{});
+                                log.warn("resize_pty notification: invalid cols type", .{});
                                 return;
                             },
                         };
@@ -1017,7 +1024,7 @@ const Client = struct {
                         }
 
                         if (self.server.ptys.get(pty_id)) |pty_instance| {
-                            std.log.info("resize_pty: pty={} requested={}x{} ({}x{}px) current_terminal={}x{}", .{
+                            log.info("resize_pty: pty={} requested={}x{} ({}x{}px) current_terminal={}x{}", .{
                                 pty_id,
                                 cols,
                                 rows,
@@ -1035,13 +1042,13 @@ const Client = struct {
                             };
                             var pty_mut = pty_instance.process;
                             pty_mut.setSize(size) catch |err| {
-                                std.log.err("Resize PTY failed: {}", .{err});
+                                log.err("Resize PTY failed: {}", .{err});
                             };
 
                             // Also resize the terminal state
                             pty_instance.terminal_mutex.lock();
                             if (pty_instance.terminal.rows != rows or pty_instance.terminal.cols != cols) {
-                                std.log.info("resize_pty: resizing terminal from {}x{} to {}x{}", .{
+                                log.info("resize_pty: resizing terminal from {}x{} to {}x{}", .{
                                     pty_instance.terminal.cols,
                                     pty_instance.terminal.rows,
                                     cols,
@@ -1052,7 +1059,7 @@ const Client = struct {
                                     cols,
                                     rows,
                                 ) catch |err| {
-                                    std.log.err("Resize terminal failed: {}", .{err});
+                                    log.err("Resize terminal failed: {}", .{err});
                                 };
                             }
                             // Update pixel dimensions for mouse encoding
@@ -1061,7 +1068,7 @@ const Client = struct {
 
                             // Send in-band size report if mode 2048 is enabled
                             const in_band_enabled = pty_instance.terminal.modes.get(.in_band_size_reports);
-                            std.log.info("resize_pty: in_band_size_reports mode={}", .{in_band_enabled});
+                            log.info("resize_pty: in_band_size_reports mode={}", .{in_band_enabled});
                             if (in_band_enabled) {
                                 var report_buf: [64]u8 = undefined;
                                 const report = std.fmt.bufPrint(&report_buf, "\x1b[48;{};{};{};{}t", .{
@@ -1070,9 +1077,9 @@ const Client = struct {
                                     y_pixel,
                                     x_pixel,
                                 }) catch unreachable;
-                                std.log.info("resize_pty: sending in-band report: {s}", .{report});
+                                log.info("resize_pty: sending in-band report: {s}", .{report});
                                 _ = posix.write(pty_instance.process.master, report) catch |err| {
-                                    std.log.err("Failed to send in-band size report: {}", .{err});
+                                    log.err("Failed to send in-band size report: {}", .{err});
                                 };
                             }
 
@@ -1081,12 +1088,12 @@ const Client = struct {
                             pty_instance.render_state.deinit(pty_instance.allocator);
                             pty_instance.render_state = .empty;
                             pty_instance.terminal_mutex.unlock();
-                            std.log.info("resize_pty: completed for pty={}", .{pty_id});
+                            log.info("resize_pty: completed for pty={}", .{pty_id});
                         } else {
-                            std.log.warn("resize_pty notification: PTY {} not found", .{pty_id});
+                            log.warn("resize_pty notification: PTY {} not found", .{pty_id});
                         }
                     } else {
-                        std.log.warn("resize_pty notification: invalid params", .{});
+                        log.warn("resize_pty notification: invalid params", .{});
                     }
                 } else if (std.mem.eql(u8, notif.method, "detach_pty")) {
                     if (notif.params == .array and notif.params.array.len >= 2) {
@@ -1094,7 +1101,7 @@ const Client = struct {
                             .unsigned => |u| @intCast(u),
                             .integer => |i| @intCast(i),
                             else => {
-                                std.log.warn("detach_pty notification: invalid pty_id type", .{});
+                                log.warn("detach_pty notification: invalid pty_id type", .{});
                                 return;
                             },
                         };
@@ -1102,7 +1109,7 @@ const Client = struct {
                             .unsigned => |u| @intCast(u),
                             .integer => |i| @intCast(i),
                             else => {
-                                std.log.warn("detach_pty notification: invalid client_fd type", .{});
+                                log.warn("detach_pty notification: invalid client_fd type", .{});
                                 return;
                             },
                         };
@@ -1121,15 +1128,15 @@ const Client = struct {
                                             break;
                                         }
                                     }
-                                    std.log.info("Client {} detached from PTY {} (marked keep_alive)", .{ c.fd, pty_id });
+                                    log.info("Client {} detached from PTY {} (marked keep_alive)", .{ c.fd, pty_id });
                                     break;
                                 }
                             }
                         } else {
-                            std.log.warn("detach_pty notification: PTY {} not found", .{pty_id});
+                            log.warn("detach_pty notification: PTY {} not found", .{pty_id});
                         }
                     } else {
-                        std.log.warn("detach_pty notification: invalid params", .{});
+                        log.warn("detach_pty notification: invalid params", .{});
                     }
                 }
             },
@@ -1146,14 +1153,14 @@ const Client = struct {
             .recv => |bytes_read| {
                 if (bytes_read == 0) {
                     // EOF - client disconnected
-                    std.log.debug("Client fd={} disconnected (EOF)", .{client.fd});
+                    log.debug("Client fd={} disconnected (EOF)", .{client.fd});
                     client.server.removeClient(client);
                 } else {
-                    std.log.debug("Received {} bytes from client fd={}", .{ bytes_read, client.fd });
+                    log.debug("Received {} bytes from client fd={}", .{ bytes_read, client.fd });
                     // Got data, try to parse as RPC message
                     const data = client.recv_buffer[0..bytes_read];
                     client.handleMessage(loop, data) catch |err| {
-                        std.log.err("Failed to handle message: {}", .{err});
+                        log.err("Failed to handle message: {}", .{err});
                     };
 
                     // Keep receiving
@@ -1164,7 +1171,7 @@ const Client = struct {
                 }
             },
             .err => {
-                std.log.debug("Client fd={} disconnected (error)", .{client.fd});
+                log.debug("Client fd={} disconnected (error)", .{client.fd});
                 client.server.removeClient(client);
             },
             else => unreachable,
@@ -1302,7 +1309,7 @@ const Server = struct {
             return msgpack.Value{ .string = try self.allocator.dupe(u8, "pong") };
         } else if (std.mem.eql(u8, method, "spawn_pty")) {
             const parsed = parseSpawnPtyParams(params);
-            std.log.info("spawn_pty: rows={} cols={} attach={}", .{ parsed.size.ws_row, parsed.size.ws_col, parsed.attach });
+            log.info("spawn_pty: rows={} cols={} attach={}", .{ parsed.size.ws_row, parsed.size.ws_col, parsed.attach });
 
             const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
 
@@ -1341,13 +1348,13 @@ const Server = struct {
                 try client.attached_sessions.append(self.allocator, pty_id);
 
                 // Send initial redraw
-                std.log.info("Sending initial redraw for PTY {}", .{pty_id});
+                log.info("Sending initial redraw for PTY {}", .{pty_id});
                 const msg = try buildRedrawMessageFromPty(self.allocator, pty_instance, .full);
                 defer self.allocator.free(msg);
                 try self.sendRedraw(self.loop, pty_instance, msg, client);
             }
 
-            std.log.info("Created PTY {} with PID {}", .{ pty_id, process.pid });
+            log.info("Created PTY {} with PID {}", .{ pty_id, process.pid });
 
             return msgpack.Value{ .unsigned = pty_id };
         } else if (std.mem.eql(u8, method, "close_pty")) {
@@ -1360,31 +1367,31 @@ const Server = struct {
                 pty_instance.stopAndCancelIO(self.loop);
                 // Send pty_exited notification (use 0 status for explicit close)
                 self.sendPtyExited(pty_id, 0) catch |err| {
-                    std.log.err("Failed to send pty_exited on close: {}", .{err});
+                    log.err("Failed to send pty_exited on close: {}", .{err});
                 };
                 pty_instance.joinAndFree(self.allocator);
-                std.log.info("Closed PTY {}", .{pty_id});
+                log.info("Closed PTY {}", .{pty_id});
                 return msgpack.Value.nil;
             } else {
                 return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
             }
         } else if (std.mem.eql(u8, method, "attach_pty")) {
-            std.log.info("attach_pty called with params: {}", .{params});
+            log.info("attach_pty called with params: {}", .{params});
             const pty_id = parseAttachPtyParams(params) catch |err| {
-                std.log.warn("attach_pty: invalid params: {}", .{err});
+                log.warn("attach_pty: invalid params: {}", .{err});
                 return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
             };
 
-            std.log.info("attach_pty: pty_id={} client_fd={}", .{ pty_id, client.fd });
+            log.info("attach_pty: pty_id={} client_fd={}", .{ pty_id, client.fd });
 
             const pty_instance = self.ptys.get(pty_id) orelse {
-                std.log.warn("attach_pty: PTY {} not found", .{pty_id});
+                log.warn("attach_pty: PTY {} not found", .{pty_id});
                 return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
             };
 
             try pty_instance.addClient(self.allocator, client);
             try client.attached_sessions.append(self.allocator, pty_id);
-            std.log.info("Client {} attached to PTY {}", .{ client.fd, pty_id });
+            log.info("Client {} attached to PTY {}", .{ client.fd, pty_id });
 
             // Send full redraw to the newly attached client
             const msg = try buildRedrawMessageFromPty(
@@ -1409,7 +1416,7 @@ const Server = struct {
             };
 
             _ = posix.write(pty_instance.process.master, data) catch |err| {
-                std.log.err("Write to PTY failed: {}", .{err});
+                log.err("Write to PTY failed: {}", .{err});
                 return msgpack.Value{ .string = try self.allocator.dupe(u8, "write failed") };
             };
 
@@ -1428,7 +1435,7 @@ const Server = struct {
                 return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
             };
 
-            std.log.info("resize_pty request: pty={} requested={}x{} ({}x{}px) current={}x{}", .{
+            log.info("resize_pty request: pty={} requested={}x{} ({}x{}px) current={}x{}", .{
                 pty_id,
                 cols,
                 rows,
@@ -1448,14 +1455,14 @@ const Server = struct {
 
             var pty_mut = pty_instance.process;
             pty_mut.setSize(size) catch |err| {
-                std.log.err("Resize PTY failed: {}", .{err});
+                log.err("Resize PTY failed: {}", .{err});
                 return msgpack.Value{ .string = try self.allocator.dupe(u8, "resize failed") };
             };
 
             // Also resize the terminal state if grid dimensions changed
             pty_instance.terminal_mutex.lock();
             if (pty_instance.terminal.rows != rows or pty_instance.terminal.cols != cols) {
-                std.log.info("resize_pty request: resizing terminal from {}x{} to {}x{}", .{
+                log.info("resize_pty request: resizing terminal from {}x{} to {}x{}", .{
                     pty_instance.terminal.cols,
                     pty_instance.terminal.rows,
                     cols,
@@ -1466,7 +1473,7 @@ const Server = struct {
                     cols,
                     rows,
                 ) catch |err| {
-                    std.log.err("Resize terminal failed: {}", .{err});
+                    log.err("Resize terminal failed: {}", .{err});
                 };
             }
 
@@ -1476,7 +1483,7 @@ const Server = struct {
 
             // Send in-band size report if mode 2048 is enabled
             const in_band_enabled = pty_instance.terminal.modes.get(.in_band_size_reports);
-            std.log.info("resize_pty request: in_band_size_reports mode={}", .{in_band_enabled});
+            log.info("resize_pty request: in_band_size_reports mode={}", .{in_band_enabled});
             if (in_band_enabled) {
                 var report_buf: [64]u8 = undefined;
                 const report = std.fmt.bufPrint(&report_buf, "\x1b[48;{};{};{};{}t", .{
@@ -1485,9 +1492,9 @@ const Server = struct {
                     y_pixel,
                     x_pixel,
                 }) catch unreachable;
-                std.log.info("resize_pty request: sending in-band report", .{});
+                log.info("resize_pty request: sending in-band report", .{});
                 _ = posix.write(pty_instance.process.master, report) catch |err| {
-                    std.log.err("Failed to send in-band size report: {}", .{err});
+                    log.err("Failed to send in-band size report: {}", .{err});
                 };
             }
 
@@ -1497,7 +1504,7 @@ const Server = struct {
             pty_instance.render_state = .empty;
             pty_instance.terminal_mutex.unlock();
 
-            std.log.info("Resized PTY {} to {}x{} ({}x{}px)", .{ pty_id, cols, rows, x_pixel, y_pixel });
+            log.info("Resized PTY {} to {}x{} ({}x{}px)", .{ pty_id, cols, rows, x_pixel, y_pixel });
             return msgpack.Value.nil;
         } else if (std.mem.eql(u8, method, "detach_pty")) {
             const args = parseDetachPtyParams(params) catch {
@@ -1523,7 +1530,7 @@ const Server = struct {
                             break;
                         }
                     }
-                    std.log.info("Client {} detached from PTY {} (marked keep_alive)", .{ c.fd, pty_id });
+                    log.info("Client {} detached from PTY {} (marked keep_alive)", .{ c.fd, pty_id });
                     break;
                 }
             }

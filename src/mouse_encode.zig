@@ -1,6 +1,12 @@
+//! Mouse input encoding for terminal protocols.
+
 const std = @import("std");
+
 const ghostty = @import("ghostty-vt");
+
 const key_parse = @import("key_parse.zig");
+
+const log = std.log.scoped(.mouse_encode);
 
 pub const TerminalState = struct {
     flags: @FieldType(ghostty.Terminal, "flags"),
@@ -30,7 +36,7 @@ pub fn encode(
     const flags = state.flags;
     const modes = state.modes;
 
-    std.log.debug("mouse_encode: event={s} format={s} x10={} normal={} button={} any={} utf8={} sgr={} urxvt={} sgr_pixels={}", .{
+    log.debug("mouse_encode: event={s} format={s} x10={} normal={} button={} any={} utf8={} sgr={} urxvt={} sgr_pixels={}", .{
         @tagName(flags.mouse_event),
         @tagName(flags.mouse_format),
         modes.get(.mouse_event_x10),
@@ -123,7 +129,7 @@ fn encodeSGR(writer: anytype, col: u16, row: u16, event: key_parse.MouseEvent) !
     // Format: CSI < Cb ; Cx ; Cy M (or m for release)
     const char: u8 = if (event.type == .release) 'm' else 'M';
 
-    std.log.debug("encodeSGR: col={} (sent {})", .{ col, col + 1 });
+    log.debug("encodeSGR: col={} (sent {})", .{ col, col + 1 });
     try writer.print("\x1b[<{};{};{}{c}", .{ cb, col + 1, row + 1, char });
 }
 

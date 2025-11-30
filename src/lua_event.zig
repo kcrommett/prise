@@ -1,9 +1,15 @@
+//! Lua scripting integration for event handling.
+
 const std = @import("std");
-const ziglua = @import("zlua");
+
 const vaxis = @import("vaxis");
-const Surface = @import("Surface.zig");
+const ziglua = @import("zlua");
+
 const msgpack = @import("msgpack.zig");
+const Surface = @import("Surface.zig");
 const vaxis_helper = @import("vaxis_helper.zig");
+
+const log = std.log.scoped(.lua_event);
 
 pub const Event = union(enum) {
     vaxis: vaxis.Event,
@@ -79,7 +85,7 @@ pub fn pushEvent(lua: *ziglua.Lua, event: Event) !void {
             lua.setField(-2, "type");
         },
         .pty_attach => |info| {
-            std.log.info("pushEvent: pty_attach id={}", .{info.id});
+            log.info("pushEvent: pty_attach id={}", .{info.id});
             _ = lua.pushString("pty_attach");
             lua.setField(-2, "type");
 
@@ -101,7 +107,7 @@ pub fn pushEvent(lua: *ziglua.Lua, event: Event) !void {
             lua.setField(-2, "pty");
 
             lua.setField(-2, "data");
-            std.log.info("pushEvent: pty_attach done", .{});
+            log.info("pushEvent: pty_attach done", .{});
         },
 
         .pty_exited => |info| {
@@ -385,7 +391,7 @@ fn ptySendKey(lua: *ziglua.Lua) i32 {
     _ = lua.getField(2, "release");
     const release = lua.toBoolean(-1);
 
-    const key = KeyData{
+    const key: KeyData = .{
         .key = key_str,
         .code = code_str,
         .ctrl = ctrl,
@@ -444,7 +450,7 @@ fn ptySendMouse(lua: *ziglua.Lua) i32 {
     }
     lua.pop(1); // Pop mods table
 
-    const mouse = MouseData{
+    const mouse: MouseData = .{
         .x = x,
         .y = y,
         .button = button,

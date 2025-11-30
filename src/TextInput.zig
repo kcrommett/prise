@@ -1,4 +1,7 @@
+//! Text input widget with cursor and editing support.
+
 const std = @import("std");
+
 const vaxis = @import("vaxis");
 
 const TextInput = @This();
@@ -101,24 +104,18 @@ pub fn render(self: *const TextInput, win: vaxis.Window, style: vaxis.Style) voi
     const visible = self.visibleText(@intCast(win.width));
     const cursor_x = self.visibleCursorPos();
 
-    for (visible, 0..) |char, i| {
-        const is_cursor = i == cursor_x;
+    // Fill the entire line with background first
+    for (0..win.width) |col| {
+        const is_cursor = col == cursor_x;
         var cell_style = style;
         if (is_cursor) {
             cell_style.reverse = true;
         }
-        win.writeCell(@intCast(i), 0, .{
-            .char = .{ .grapheme = &[_]u8{char}, .width = 1 },
-            .style = cell_style,
-        });
-    }
 
-    if (cursor_x >= visible.len) {
-        var cursor_style = style;
-        cursor_style.reverse = true;
-        win.writeCell(@intCast(visible.len), 0, .{
-            .char = .{ .grapheme = " ", .width = 1 },
-            .style = cursor_style,
+        const grapheme: []const u8 = if (col < visible.len) visible[col .. col + 1] else " ";
+        win.writeCell(@intCast(col), 0, .{
+            .char = .{ .grapheme = grapheme, .width = 1 },
+            .style = cell_style,
         });
     }
 }

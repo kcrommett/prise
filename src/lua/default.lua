@@ -1,5 +1,39 @@
 local prise = require("prise")
 
+---@class Pane
+---@field type "pane"
+---@field id number
+---@field pty userdata
+---@field ratio? number
+
+---@class Split
+---@field type "split"
+---@field split_id number
+---@field direction "row"|"col"
+---@field ratio? number
+---@field children (Pane|Split)[]
+
+---@alias Node Pane|Split
+
+---@class PaletteState
+---@field visible boolean
+---@field input? userdata
+---@field selected number
+---@field scroll_offset number
+
+---@class State
+---@field root? Node
+---@field focused_id? number
+---@field pending_command boolean
+---@field timer? userdata
+---@field pending_split? { direction: "row"|"col" }
+---@field next_split_id number
+---@field palette PaletteState
+
+---@class Command
+---@field name string
+---@field action fun()
+
 -- Powerline symbols
 local PL = {
     right_solid = "",
@@ -51,14 +85,23 @@ local RESIZE_STEP = 0.05 -- 5% step for keyboard resize
 
 -- --- Helpers ---
 
+---@param node? Node
+---@return boolean
 local function is_pane(node)
     return node and node.type == "pane"
 end
+
+---@param node? Node
+---@return boolean
 local function is_split(node)
     return node and node.type == "split"
 end
 
--- Returns a list of nodes from root to the target node [root, ..., target]
+---Returns a list of nodes from root to the target node [root, ..., target]
+---@param current? Node
+---@param target_id number
+---@param path? Node[]
+---@return Node[]?
 local function find_node_path(current, target_id, path)
     path = path or {}
     if not current then
@@ -84,6 +127,8 @@ local function find_node_path(current, target_id, path)
     return nil
 end
 
+---@param node? Node
+---@return Pane?
 local function get_first_leaf(node)
     if not node then
         return nil
@@ -97,6 +142,8 @@ local function get_first_leaf(node)
     return nil
 end
 
+---@param node? Node
+---@return Pane?
 local function get_last_leaf(node)
     if not node then
         return nil
@@ -110,7 +157,12 @@ local function get_last_leaf(node)
     return nil
 end
 
--- Recursively insert a new pane relative to target_id
+---Recursively insert a new pane relative to target_id
+---@param node Node
+---@param target_id number
+---@param new_pane Pane
+---@param direction "row"|"col"
+---@return Node
 local function insert_split_recursive(node, target_id, new_pane, direction)
     if is_pane(node) then
         if node.id == target_id then
@@ -139,7 +191,10 @@ local function insert_split_recursive(node, target_id, new_pane, direction)
     return node
 end
 
--- Recursively remove a pane and return: new_node, closest_sibling_id
+---Recursively remove a pane and return: new_node, closest_sibling_id
+---@param node Node
+---@param id number
+---@return Node?, number?
 local function remove_pane_recursive(node, id)
     if is_pane(node) then
         if node.id == id then
@@ -203,6 +258,7 @@ local function remove_pane_recursive(node, id)
     return nil, nil
 end
 
+---@return userdata?
 local function get_focused_pty()
     if not state.focused_id or not state.root then
         return nil
@@ -214,6 +270,7 @@ local function get_focused_pty()
     return nil
 end
 
+---@param id number
 local function remove_pane_by_id(id)
     local new_root, next_focus = remove_pane_recursive(state.root, id)
     state.root = new_root
@@ -235,7 +292,9 @@ local function remove_pane_by_id(id)
     prise.request_frame()
 end
 
--- Count all panes in the tree
+---Count all panes in the tree
+---@param node? Node
+---@return number
 local function count_panes(node)
     if not node then
         return 0
@@ -253,7 +312,9 @@ local function count_panes(node)
     return 0
 end
 
--- Get index of focused pane (1-based) and total count
+---Get index of focused pane (1-based) and total count
+---@return number index
+---@return number total
 local function get_pane_position()
     if not state.root or not state.focused_id then
         return 1, 1
@@ -279,7 +340,9 @@ local function get_pane_position()
     return found_index, index
 end
 
--- Serialize a node tree to a table with pty_ids instead of userdata
+---Serialize a node tree to a table with pty_ids instead of userdata
+---@param node? Node
+---@return table?
 local function serialize_node(node)
     if not node then
         return nil
@@ -307,7 +370,10 @@ local function serialize_node(node)
     return nil
 end
 
--- Deserialize a node tree, looking up PTYs by id
+---Deserialize a node tree, looking up PTYs by id
+---@param saved? table
+---@param pty_lookup fun(id: number): userdata?
+---@return Node?
 local function deserialize_node(saved, pty_lookup)
     if not saved then
         return nil
@@ -349,6 +415,8 @@ local function deserialize_node(saved, pty_lookup)
     return nil
 end
 
+---@param dimension "width"|"height"
+---@param delta_ratio number
 local function resize_pane(dimension, delta_ratio)
     if not state.focused_id or not state.root then
         return
@@ -404,6 +472,7 @@ local function resize_pane(dimension, delta_ratio)
     prise.request_frame()
 end
 
+---@param direction "left"|"right"|"up"|"down"
 local function move_focus(direction)
     if not state.focused_id or not state.root then
         return
@@ -467,7 +536,8 @@ local function move_focus(direction)
     end
 end
 
--- Command palette commands
+---Command palette commands
+---@type Command[]
 local commands = {
     {
         name = "Split Horizontal",
@@ -536,6 +606,8 @@ local commands = {
     },
 }
 
+---@param query string
+---@return Command[]
 local function filter_commands(query)
     if not query or query == "" then
         return commands
@@ -576,6 +648,7 @@ end
 
 -- --- Main Functions ---
 
+---@param event { type: string, data: table }
 function M.update(event)
     if event.type == "pty_attach" then
         prise.log.info("Lua: pty_attach received")
@@ -763,8 +836,8 @@ function M.update(event)
             return
         end
 
-        -- Super+; to enter command mode
-        if event.data.key == ";" and event.data.super then
+        -- Super+k or Ctrl+k to enter command mode
+        if event.data.key == "k" and (event.data.super or event.data.ctrl) then
             state.pending_command = true
             prise.request_frame()
             state.timer = prise.set_timeout(1000, function()
@@ -860,19 +933,25 @@ function M.update(event)
     end
 end
 
--- Recursive rendering function
-local function render_node(node)
+---Recursive rendering function
+---@param node Node
+---@param force_unfocused? boolean
+---@return table
+local function render_node(node, force_unfocused)
     if is_pane(node) then
-        local is_focused = (node.id == state.focused_id)
+        local is_focused = (node.id == state.focused_id) and not (force_unfocused == true)
+        prise.log.debug(
+            "render_node: force_unfocused=" .. tostring(force_unfocused) .. " is_focused=" .. tostring(is_focused)
+        )
         return prise.Terminal({
             pty = node.pty,
             ratio = node.ratio,
-            show_cursor = is_focused,
+            focus = is_focused,
         })
     elseif is_split(node) then
         local children_widgets = {}
         for _, child in ipairs(node.children) do
-            table.insert(children_widgets, render_node(child))
+            table.insert(children_widgets, render_node(child, force_unfocused))
         end
 
         local props = {
@@ -890,7 +969,8 @@ local function render_node(node)
     end
 end
 
--- Build the command palette overlay
+---Build the command palette overlay
+---@return table?
 local function build_palette()
     if not state.palette.visible or not state.palette.input then
         return nil
@@ -908,36 +988,45 @@ local function build_palette()
         table.insert(items, cmd.name)
     end
 
-    local palette_style = { bg = theme.bg2, fg = theme.fg_bright }
+    local palette_style = { bg = theme.bg1, fg = theme.fg_bright }
     local selected_style = { bg = theme.accent, fg = theme.fg_dark }
-    local input_style = { bg = theme.bg3, fg = theme.fg_bright }
+    local input_style = { bg = theme.bg1, fg = theme.fg_bright }
 
     return prise.Positioned({
         anchor = "top_center",
-        y = 2,
+        y = 5,
         child = prise.Box({
-            border = "rounded",
+            border = "none",
+            max_width = 60,
             style = palette_style,
-            child = prise.Column({
-                cross_axis_align = "stretch",
-                children = {
-                    prise.TextInput({
-                        input = state.palette.input,
-                        style = input_style,
-                    }),
-                    prise.List({
-                        items = items,
-                        selected = state.palette.selected,
-                        style = palette_style,
-                        selected_style = selected_style,
-                    }),
-                },
+            child = prise.Padding({
+                top = 1,
+                bottom = 1,
+                left = 2,
+                right = 2,
+                child = prise.Column({
+                    cross_axis_align = "stretch",
+                    children = {
+                        prise.TextInput({
+                            input = state.palette.input,
+                            style = input_style,
+                        }),
+                        prise.Text({ text = string.rep("─", 60), style = { fg = theme.bg3 } }),
+                        prise.List({
+                            items = items,
+                            selected = state.palette.selected,
+                            style = palette_style,
+                            selected_style = selected_style,
+                        }),
+                    },
+                }),
             }),
         }),
     })
 end
 
--- Build the powerline-style status bar
+---Build the powerline-style status bar
+---@return table
 local function build_status_bar()
     local mode_color = state.pending_command and theme.mode_command or theme.mode_normal
     local mode_text = state.pending_command and " CMD " or " PRISE "
@@ -975,6 +1064,7 @@ local function build_status_bar()
     })
 end
 
+---@return table
 function M.view()
     if not state.root then
         return prise.Column({
@@ -983,7 +1073,9 @@ function M.view()
         })
     end
 
-    local content = render_node(state.root)
+    local palette = build_palette()
+    prise.log.debug("view: palette.visible=" .. tostring(state.palette.visible))
+    local content = render_node(state.root, state.palette.visible)
     local status_bar = build_status_bar()
 
     local main_ui = prise.Column({
@@ -994,7 +1086,6 @@ function M.view()
         },
     })
 
-    local palette = build_palette()
     if palette then
         return prise.Stack({
             children = {
@@ -1007,6 +1098,7 @@ function M.view()
     return main_ui
 end
 
+---@return table
 function M.get_state()
     return {
         root = serialize_node(state.root),
@@ -1015,6 +1107,8 @@ function M.get_state()
     }
 end
 
+---@param saved? table
+---@param pty_lookup fun(id: number): userdata?
 function M.set_state(saved, pty_lookup)
     if not saved then
         return

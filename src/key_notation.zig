@@ -1,4 +1,7 @@
+//! Human-readable key notation parsing and formatting.
+
 const std = @import("std");
+
 const vaxis = @import("vaxis");
 
 /// Convert a vaxis Key to key notation
