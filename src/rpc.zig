@@ -77,12 +77,16 @@ pub const DecodeResult = struct {
 };
 
 pub fn decodeMessage(allocator: Allocator, data: []const u8) DecodeError!Message {
+    std.debug.assert(data.len > 0);
+
     var decoder = msgpack.Decoder.init(allocator, data);
 
     const len = try decoder.readArrayLen();
     if (len < 3) return error.InvalidArrayLength;
+    std.debug.assert(len >= 3 and len <= 4);
 
     const msg_type = try decoder.readInt();
+    std.debug.assert(msg_type >= 0 and msg_type <= 2);
 
     switch (msg_type) {
         0 => { // Request: [0, msgid, method, params]
@@ -141,12 +145,16 @@ pub fn decodeMessage(allocator: Allocator, data: []const u8) DecodeError!Message
 }
 
 pub fn decodeMessageWithSize(allocator: Allocator, data: []const u8) DecodeError!DecodeResult {
+    std.debug.assert(data.len > 0);
+
     var decoder = msgpack.Decoder.init(allocator, data);
 
     const len = try decoder.readArrayLen();
     if (len < 3) return error.InvalidArrayLength;
+    std.debug.assert(len >= 3 and len <= 4);
 
     const msg_type = try decoder.readInt();
+    std.debug.assert(msg_type >= 0 and msg_type <= 2);
 
     const message = switch (msg_type) {
         0 => blk: { // Request: [0, msgid, method, params]

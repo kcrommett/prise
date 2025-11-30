@@ -752,7 +752,9 @@ const Client = struct {
     fn sendData(self: *Client, loop: *io.Loop, data: []const u8) !void {
         if (self.closing) return;
 
+        std.debug.assert(data.len > 0);
         std.debug.assert(data.len <= LIMITS.MESSAGE_SIZE_MAX);
+        std.debug.assert(self.fd >= 0);
 
         const buf = try self.server.allocator.dupe(u8, data);
         errdefer self.server.allocator.free(buf);
@@ -870,16 +872,16 @@ const Client = struct {
     }
 
     fn processMessage(self: *Client, loop: *io.Loop, msg: rpc.Message) !void {
+        std.debug.assert(!self.closing);
+        std.debug.assert(self.fd >= 0);
+
         switch (msg) {
             .request => |req| {
-                // std.log.info("Got request: msgid={} method={s}", .{ req.msgid, req.method });
+                std.debug.assert(req.method.len > 0);
 
-                // Dispatch to handler
                 const result = try self.server.handleRequest(self, req.method, req.params);
                 defer result.deinit(self.server.allocator);
 
-                // Send response: [1, msgid, error, result]
-                // Build response array manually since we have a Value
                 const response_arr = try self.server.allocator.alloc(msgpack.Value, 4);
                 defer self.server.allocator.free(response_arr);
                 response_arr[0] = msgpack.Value{ .unsigned = 1 }; // type
@@ -891,10 +893,12 @@ const Client = struct {
                 const response_bytes = try msgpack.encodeFromValue(self.server.allocator, response_value);
                 defer self.server.allocator.free(response_bytes);
 
+                std.debug.assert(response_bytes.len <= LIMITS.MESSAGE_SIZE_MAX);
                 try self.sendData(loop, response_bytes);
             },
             .notification => |notif| {
-                // Handle notifications (no response needed)
+                std.debug.assert(notif.method.len > 0);
+
                 if (std.mem.eql(u8, notif.method, "write_pty")) {
                     if (notif.params == .array and notif.params.array.len >= 2) {
                         const pty_id: usize = switch (notif.params.array[0]) {
@@ -1509,231 +1513,259 @@ const Server = struct {
         };
     }
 
-    fn handleRequest(self: *Server, client: *Client, method: []const u8, params: msgpack.Value) !msgpack.Value {
-        if (std.mem.eql(u8, method, "ping")) {
-            return msgpack.Value{ .string = try self.allocator.dupe(u8, "pong") };
-        } else if (std.mem.eql(u8, method, "spawn_pty")) {
-            if (self.ptys.count() >= LIMITS.PTYS_MAX) {
-                log.warn("PTY limit reached ({})", .{LIMITS.PTYS_MAX});
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY limit reached") };
+    fn handleSpawnPty(self: *Server, client: *Client, params: msgpack.Value) !msgpack.Value {
+        if (self.ptys.count() >= LIMITS.PTYS_MAX) {
+            log.warn("PTY limit reached ({})", .{LIMITS.PTYS_MAX});
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY limit reached") };
+        }
+
+        const parsed = parseSpawnPtyParams(params);
+        log.info("spawn_pty: rows={} cols={} attach={}", .{ parsed.size.ws_row, parsed.size.ws_col, parsed.attach });
+
+        const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
+
+        var env_map = try std.process.getEnvMap(self.allocator);
+        defer env_map.deinit();
+
+        var env_list = try prepareSpawnEnv(self.allocator, &env_map);
+        defer {
+            for (env_list.items) |item| {
+                self.allocator.free(item);
             }
+            env_list.deinit(self.allocator);
+        }
 
-            const parsed = parseSpawnPtyParams(params);
-            log.info("spawn_pty: rows={} cols={} attach={}", .{ parsed.size.ws_row, parsed.size.ws_col, parsed.attach });
+        const process = try pty.Process.spawn(self.allocator, parsed.size, &.{shell}, @ptrCast(env_list.items));
 
-            const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
+        const pty_id = self.next_pty_id;
+        self.next_pty_id += 1;
 
-            // Prepare environment
-            var env_map = try std.process.getEnvMap(self.allocator);
-            defer env_map.deinit();
+        const pty_instance = try Pty.init(self.allocator, pty_id, process, parsed.size);
+        pty_instance.server_ptr = self;
 
-            var env_list = try prepareSpawnEnv(self.allocator, &env_map);
-            // Manage lifetime of strings in env_list
-            defer {
-                for (env_list.items) |item| {
-                    self.allocator.free(item);
-                }
-                env_list.deinit(self.allocator);
-            }
+        try self.ptys.put(pty_id, pty_instance);
+        std.debug.assert(self.ptys.count() <= LIMITS.PTYS_MAX);
 
-            const process = try pty.Process.spawn(self.allocator, parsed.size, &.{shell}, @ptrCast(env_list.items));
+        pty_instance.read_thread = try std.Thread.spawn(.{}, Pty.readThread, .{ pty_instance, self });
 
-            const pty_id = self.next_pty_id;
-            self.next_pty_id += 1;
+        _ = try self.loop.read(pty_instance.pipe_fds[0], &pty_instance.dirty_signal_buf, .{
+            .ptr = pty_instance,
+            .cb = onPtyDirty,
+        });
 
-            const pty_instance = try Pty.init(self.allocator, pty_id, process, parsed.size);
-            pty_instance.server_ptr = self;
-
-            try self.ptys.put(pty_id, pty_instance);
-            std.debug.assert(self.ptys.count() <= LIMITS.PTYS_MAX);
-
-            pty_instance.read_thread = try std.Thread.spawn(.{}, Pty.readThread, .{ pty_instance, self });
-
-            // Register dirty signal pipe
-            _ = try self.loop.read(pty_instance.pipe_fds[0], &pty_instance.dirty_signal_buf, .{
-                .ptr = pty_instance,
-                .cb = onPtyDirty,
-            });
-
-            if (parsed.attach) {
-                try client.attached_sessions.append(self.allocator, pty_id);
-
-                // Send initial redraw
-                log.info("Sending initial redraw for PTY {}", .{pty_id});
-                const msg = try buildRedrawMessageFromPty(self.allocator, pty_instance, .full);
-                defer self.allocator.free(msg);
-                try self.sendRedraw(self.loop, pty_instance, msg, client);
-            }
-
-            log.info("Created PTY {} with PID {}", .{ pty_id, process.pid });
-
-            return msgpack.Value{ .unsigned = pty_id };
-        } else if (std.mem.eql(u8, method, "close_pty")) {
-            const pty_id = parseClosePtyParams(params) catch {
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
-            };
-
-            if (self.ptys.fetchRemove(pty_id)) |kv| {
-                const pty_instance = kv.value;
-                pty_instance.stopAndCancelIO(self.loop);
-                // Send pty_exited notification (use 0 status for explicit close)
-                self.sendPtyExited(pty_id, 0) catch |err| {
-                    log.err("Failed to send pty_exited on close: {}", .{err});
-                };
-                pty_instance.joinAndFree(self.allocator);
-                log.info("Closed PTY {}", .{pty_id});
-                return msgpack.Value.nil;
-            } else {
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
-            }
-        } else if (std.mem.eql(u8, method, "attach_pty")) {
-            log.info("attach_pty called with params: {}", .{params});
-            const pty_id = parseAttachPtyParams(params) catch |err| {
-                log.warn("attach_pty: invalid params: {}", .{err});
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
-            };
-
-            log.info("attach_pty: pty_id={} client_fd={}", .{ pty_id, client.fd });
-
-            const pty_instance = self.ptys.get(pty_id) orelse {
-                log.warn("attach_pty: PTY {} not found", .{pty_id});
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
-            };
-
-            try pty_instance.addClient(self.allocator, client);
+        if (parsed.attach) {
             try client.attached_sessions.append(self.allocator, pty_id);
-            log.info("Client {} attached to PTY {}", .{ client.fd, pty_id });
 
-            // Send full redraw to the newly attached client
-            const msg = try buildRedrawMessageFromPty(
-                self.allocator,
-                pty_instance,
-                .full,
-            );
+            log.info("Sending initial redraw for PTY {}", .{pty_id});
+            const msg = try buildRedrawMessageFromPty(self.allocator, pty_instance, .full);
             defer self.allocator.free(msg);
-
             try self.sendRedraw(self.loop, pty_instance, msg, client);
+        }
 
-            return msgpack.Value{ .unsigned = pty_id };
-        } else if (std.mem.eql(u8, method, "write_pty")) {
-            const args = parseWritePtyParams(params) catch {
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+        log.info("Created PTY {} with PID {}", .{ pty_id, process.pid });
+
+        return msgpack.Value{ .unsigned = pty_id };
+    }
+
+    fn handleClosePty(self: *Server, params: msgpack.Value) !msgpack.Value {
+        const pty_id = parseClosePtyParams(params) catch {
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+        };
+
+        if (self.ptys.fetchRemove(pty_id)) |kv| {
+            const pty_instance = kv.value;
+            pty_instance.stopAndCancelIO(self.loop);
+            self.sendPtyExited(pty_id, 0) catch |err| {
+                log.err("Failed to send pty_exited on close: {}", .{err});
             };
-            const pty_id = args.id;
-            const data = args.data;
-
-            const pty_instance = self.ptys.get(pty_id) orelse {
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
-            };
-
-            _ = posix.write(pty_instance.process.master, data) catch |err| {
-                log.err("Write to PTY failed: {}", .{err});
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "write failed") };
-            };
-
+            pty_instance.joinAndFree(self.allocator);
+            log.info("Closed PTY {}", .{pty_id});
             return msgpack.Value.nil;
-        } else if (std.mem.eql(u8, method, "resize_pty")) {
-            const args = parseResizePtyParams(params) catch {
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
-            };
-            const pty_id = args.id;
-            const rows = args.rows;
-            const cols = args.cols;
-            const x_pixel = args.x_pixel;
-            const y_pixel = args.y_pixel;
+        } else {
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
+        }
+    }
 
-            const pty_instance = self.ptys.get(pty_id) orelse {
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
-            };
+    fn handleAttachPty(self: *Server, client: *Client, params: msgpack.Value) !msgpack.Value {
+        log.info("attach_pty called with params: {}", .{params});
+        const pty_id = parseAttachPtyParams(params) catch |err| {
+            log.warn("attach_pty: invalid params: {}", .{err});
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+        };
 
-            log.info("resize_pty request: pty={} requested={}x{} ({}x{}px) current={}x{}", .{
-                pty_id,
-                cols,
-                rows,
-                x_pixel,
-                y_pixel,
+        log.info("attach_pty: pty_id={} client_fd={}", .{ pty_id, client.fd });
+
+        const pty_instance = self.ptys.get(pty_id) orelse {
+            log.warn("attach_pty: PTY {} not found", .{pty_id});
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
+        };
+
+        try pty_instance.addClient(self.allocator, client);
+        try client.attached_sessions.append(self.allocator, pty_id);
+        log.info("Client {} attached to PTY {}", .{ client.fd, pty_id });
+
+        const msg = try buildRedrawMessageFromPty(self.allocator, pty_instance, .full);
+        defer self.allocator.free(msg);
+
+        try self.sendRedraw(self.loop, pty_instance, msg, client);
+
+        return msgpack.Value{ .unsigned = pty_id };
+    }
+
+    fn handleWritePty(self: *Server, params: msgpack.Value) !msgpack.Value {
+        const args = parseWritePtyParams(params) catch {
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+        };
+
+        const pty_instance = self.ptys.get(args.id) orelse {
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
+        };
+
+        _ = posix.write(pty_instance.process.master, args.data) catch |err| {
+            log.err("Write to PTY failed: {}", .{err});
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "write failed") };
+        };
+
+        return msgpack.Value.nil;
+    }
+
+    fn handleResizePty(self: *Server, params: msgpack.Value) !msgpack.Value {
+        const args = parseResizePtyParams(params) catch {
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+        };
+
+        const pty_instance = self.ptys.get(args.id) orelse {
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
+        };
+
+        log.info("resize_pty request: pty={} requested={}x{} ({}x{}px) current={}x{}", .{
+            args.id,
+            args.cols,
+            args.rows,
+            args.x_pixel,
+            args.y_pixel,
+            pty_instance.terminal.cols,
+            pty_instance.terminal.rows,
+        });
+
+        const size: pty.winsize = .{
+            .ws_row = args.rows,
+            .ws_col = args.cols,
+            .ws_xpixel = args.x_pixel,
+            .ws_ypixel = args.y_pixel,
+        };
+
+        var pty_mut = pty_instance.process;
+        pty_mut.setSize(size) catch |err| {
+            log.err("Resize PTY failed: {}", .{err});
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "resize failed") };
+        };
+
+        pty_instance.terminal_mutex.lock();
+        if (pty_instance.terminal.rows != args.rows or pty_instance.terminal.cols != args.cols) {
+            log.info("resize_pty request: resizing terminal from {}x{} to {}x{}", .{
                 pty_instance.terminal.cols,
                 pty_instance.terminal.rows,
+                args.cols,
+                args.rows,
             });
-
-            // Update PTY size including pixels
-            const size: pty.winsize = .{
-                .ws_row = rows,
-                .ws_col = cols,
-                .ws_xpixel = x_pixel,
-                .ws_ypixel = y_pixel,
+            pty_instance.terminal.resize(pty_instance.allocator, args.cols, args.rows) catch |err| {
+                log.err("Resize terminal failed: {}", .{err});
             };
+        }
 
-            var pty_mut = pty_instance.process;
-            pty_mut.setSize(size) catch |err| {
-                log.err("Resize PTY failed: {}", .{err});
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "resize failed") };
+        pty_instance.terminal.width_px = args.x_pixel;
+        pty_instance.terminal.height_px = args.y_pixel;
+
+        const in_band_enabled = pty_instance.terminal.modes.get(.in_band_size_reports);
+        log.info("resize_pty request: in_band_size_reports mode={}", .{in_band_enabled});
+        if (in_band_enabled) {
+            var report_buf: [64]u8 = undefined;
+            const report = std.fmt.bufPrint(&report_buf, "\x1b[48;{};{};{};{}t", .{
+                args.rows,
+                args.cols,
+                args.y_pixel,
+                args.x_pixel,
+            }) catch unreachable;
+            log.info("resize_pty request: sending in-band report", .{});
+            _ = posix.write(pty_instance.process.master, report) catch |err| {
+                log.err("Failed to send in-band size report: {}", .{err});
             };
+        }
 
-            // Also resize the terminal state if grid dimensions changed
-            pty_instance.terminal_mutex.lock();
-            if (pty_instance.terminal.rows != rows or pty_instance.terminal.cols != cols) {
-                log.info("resize_pty request: resizing terminal from {}x{} to {}x{}", .{
-                    pty_instance.terminal.cols,
-                    pty_instance.terminal.rows,
-                    cols,
-                    rows,
-                });
-                pty_instance.terminal.resize(
-                    pty_instance.allocator,
-                    cols,
-                    rows,
-                ) catch |err| {
-                    log.err("Resize terminal failed: {}", .{err});
-                };
+        pty_instance.render_state.deinit(pty_instance.allocator);
+        pty_instance.render_state = .empty;
+        pty_instance.terminal_mutex.unlock();
+
+        log.info("Resized PTY {} to {}x{} ({}x{}px)", .{ args.id, args.cols, args.rows, args.x_pixel, args.y_pixel });
+        return msgpack.Value.nil;
+    }
+
+    fn handleDetachPty(self: *Server, params: msgpack.Value) !msgpack.Value {
+        const args = parseDetachPtyParams(params) catch {
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+        };
+
+        const pty_instance = self.ptys.get(args.id) orelse {
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
+        };
+
+        pty_instance.keep_alive = true;
+
+        for (self.clients.items) |c| {
+            if (c.fd == args.client_fd) {
+                pty_instance.removeClient(c);
+                for (c.attached_sessions.items, 0..) |sid, i| {
+                    if (sid == args.id) {
+                        _ = c.attached_sessions.swapRemove(i);
+                        break;
+                    }
+                }
+                log.info("Client {} detached from PTY {} (marked keep_alive)", .{ c.fd, args.id });
+                break;
             }
+        }
 
-            // Update pixel dimensions for mouse encoding
-            pty_instance.terminal.width_px = x_pixel;
-            pty_instance.terminal.height_px = y_pixel;
+        return msgpack.Value.nil;
+    }
 
-            // Send in-band size report if mode 2048 is enabled
-            const in_band_enabled = pty_instance.terminal.modes.get(.in_band_size_reports);
-            log.info("resize_pty request: in_band_size_reports mode={}", .{in_band_enabled});
-            if (in_band_enabled) {
-                var report_buf: [64]u8 = undefined;
-                const report = std.fmt.bufPrint(&report_buf, "\x1b[48;{};{};{};{}t", .{
-                    rows,
-                    cols,
-                    y_pixel,
-                    x_pixel,
-                }) catch unreachable;
-                log.info("resize_pty request: sending in-band report", .{});
-                _ = posix.write(pty_instance.process.master, report) catch |err| {
-                    log.err("Failed to send in-band size report: {}", .{err});
-                };
+    fn handleDetachPtys(self: *Server, params: msgpack.Value) !msgpack.Value {
+        const params_arr = switch (params) {
+            .array => |arr| arr,
+            else => return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") },
+        };
+        if (params_arr.len < 2) {
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+        }
+        const pty_ids = switch (params_arr[0]) {
+            .array => |arr| arr,
+            else => return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") },
+        };
+        const client_fd: posix.fd_t = switch (params_arr[1]) {
+            .unsigned => |u| @intCast(u),
+            .integer => |i| @intCast(i),
+            else => return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") },
+        };
+
+        var matching_client: ?*Client = null;
+        for (self.clients.items) |c| {
+            if (c.fd == client_fd) {
+                matching_client = c;
+                break;
             }
+        }
 
-            // After resize, reset render_state completely to avoid stale page references
-            // that could cause assertion failures in render_state.update()
-            pty_instance.render_state.deinit(pty_instance.allocator);
-            pty_instance.render_state = .empty;
-            pty_instance.terminal_mutex.unlock();
-
-            log.info("Resized PTY {} to {}x{} ({}x{}px)", .{ pty_id, cols, rows, x_pixel, y_pixel });
-            return msgpack.Value.nil;
-        } else if (std.mem.eql(u8, method, "detach_pty")) {
-            const args = parseDetachPtyParams(params) catch {
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
-            };
-            const pty_id = args.id;
-            const client_fd = args.client_fd;
-
-            const pty_instance = self.ptys.get(pty_id) orelse {
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
+        for (pty_ids) |pty_id_val| {
+            const pty_id: usize = switch (pty_id_val) {
+                .unsigned => |u| u,
+                .integer => |i| @intCast(i),
+                else => continue,
             };
 
-            // Mark PTY as keep_alive since client explicitly detached
-            pty_instance.keep_alive = true;
+            if (self.ptys.get(pty_id)) |pty_instance| {
+                pty_instance.keep_alive = true;
 
-            // Find client by fd and detach
-            for (self.clients.items) |c| {
-                if (c.fd == client_fd) {
+                if (matching_client) |c| {
                     pty_instance.removeClient(c);
                     for (c.attached_sessions.items, 0..) |sid, i| {
                         if (sid == pty_id) {
@@ -1741,107 +1773,82 @@ const Server = struct {
                             break;
                         }
                     }
-                    log.info("Client {} detached from PTY {} (marked keep_alive)", .{ c.fd, pty_id });
-                    break;
                 }
+                std.log.info("PTY {} marked keep_alive", .{pty_id});
             }
+        }
 
+        return msgpack.Value.nil;
+    }
+
+    fn handleGetSelection(self: *Server, params: msgpack.Value) !msgpack.Value {
+        const pty_id = parsePtyId(params) catch {
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+        };
+
+        const pty_instance = self.ptys.get(pty_id) orelse {
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
+        };
+
+        pty_instance.terminal_mutex.lock();
+        defer pty_instance.terminal_mutex.unlock();
+
+        const screen = pty_instance.terminal.screens.active;
+        const sel = screen.selection orelse {
             return msgpack.Value.nil;
+        };
+
+        const result = screen.selectionString(self.allocator, .{
+            .sel = sel,
+            .trim = true,
+        }) catch |err| {
+            std.log.err("Failed to get selection string: {}", .{err});
+            return msgpack.Value.nil;
+        };
+
+        return msgpack.Value{ .string = result };
+    }
+
+    fn handleClearSelection(self: *Server, params: msgpack.Value) !msgpack.Value {
+        const pty_id = parsePtyId(params) catch {
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+        };
+
+        const pty_instance = self.ptys.get(pty_id) orelse {
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
+        };
+
+        pty_instance.terminal_mutex.lock();
+        const screen = pty_instance.terminal.screens.active;
+        screen.select(null) catch {};
+        pty_instance.terminal_mutex.unlock();
+
+        _ = posix.write(pty_instance.pipe_fds[1], "x") catch {};
+
+        return msgpack.Value.nil;
+    }
+
+    fn handleRequest(self: *Server, client: *Client, method: []const u8, params: msgpack.Value) !msgpack.Value {
+        if (std.mem.eql(u8, method, "ping")) {
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "pong") };
+        } else if (std.mem.eql(u8, method, "spawn_pty")) {
+            return self.handleSpawnPty(client, params);
+        } else if (std.mem.eql(u8, method, "close_pty")) {
+            return self.handleClosePty(params);
+        } else if (std.mem.eql(u8, method, "attach_pty")) {
+            return self.handleAttachPty(client, params);
+        } else if (std.mem.eql(u8, method, "write_pty")) {
+            return self.handleWritePty(params);
+        } else if (std.mem.eql(u8, method, "resize_pty")) {
+            return self.handleResizePty(params);
+        } else if (std.mem.eql(u8, method, "detach_pty")) {
+            return self.handleDetachPty(params);
         } else if (std.mem.eql(u8, method, "detach_ptys")) {
-            // params: [pty_ids_array, client_fd]
-            const params_arr = switch (params) {
-                .array => |arr| arr,
-                else => return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") },
-            };
-            if (params_arr.len < 2) {
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
-            }
-            const pty_ids = switch (params_arr[0]) {
-                .array => |arr| arr,
-                else => return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") },
-            };
-            const client_fd: posix.fd_t = switch (params_arr[1]) {
-                .unsigned => |u| @intCast(u),
-                .integer => |i| @intCast(i),
-                else => return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") },
-            };
-
-            // Find client by fd
-            var matching_client: ?*Client = null;
-            for (self.clients.items) |c| {
-                if (c.fd == client_fd) {
-                    matching_client = c;
-                    break;
-                }
-            }
-
-            for (pty_ids) |pty_id_val| {
-                const pty_id: usize = switch (pty_id_val) {
-                    .unsigned => |u| u,
-                    .integer => |i| @intCast(i),
-                    else => continue,
-                };
-
-                if (self.ptys.get(pty_id)) |pty_instance| {
-                    pty_instance.keep_alive = true;
-
-                    if (matching_client) |c| {
-                        pty_instance.removeClient(c);
-                        for (c.attached_sessions.items, 0..) |sid, i| {
-                            if (sid == pty_id) {
-                                _ = c.attached_sessions.swapRemove(i);
-                                break;
-                            }
-                        }
-                    }
-                    std.log.info("PTY {} marked keep_alive", .{pty_id});
-                }
-            }
-
-            return msgpack.Value.nil;
+            return self.handleDetachPtys(params);
         } else if (std.mem.eql(u8, method, "get_selection")) {
-            const pty_id = parsePtyId(params) catch {
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
-            };
-
-            const pty_instance = self.ptys.get(pty_id) orelse {
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
-            };
-
-            pty_instance.terminal_mutex.lock();
-            defer pty_instance.terminal_mutex.unlock();
-
-            const screen = pty_instance.terminal.screens.active;
-            const sel = screen.selection orelse {
-                return msgpack.Value.nil;
-            };
-
-            const result = screen.selectionString(self.allocator, .{
-                .sel = sel,
-                .trim = true,
-            }) catch |err| {
-                std.log.err("Failed to get selection string: {}", .{err});
-                return msgpack.Value.nil;
-            };
-
-            return msgpack.Value{ .string = result };
+            return self.handleGetSelection(params);
         } else if (std.mem.eql(u8, method, "clear_selection")) {
-            const pty_id = parsePtyId(params) catch {
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
-            };
-
-            const pty_instance = self.ptys.get(pty_id) orelse {
-                return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
-            };
-
-            pty_instance.terminal_mutex.lock();
-            const screen = pty_instance.terminal.screens.active;
-            screen.select(null) catch {};
-            pty_instance.terminal_mutex.unlock();
-
-            _ = posix.write(pty_instance.pipe_fds[1], "x") catch {};
-
-            return msgpack.Value.nil;
+            return self.handleClearSelection(params);
         } else {
             return msgpack.Value{ .string = try self.allocator.dupe(u8, "unknown method") };
         }
