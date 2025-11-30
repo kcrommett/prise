@@ -216,6 +216,7 @@ const Pty = struct {
                     break;
                 };
                 if (n == 0) {
+                    log.info("PTY {} master returned EOF", .{self.id});
                     self.running.store(false, .seq_cst);
                     break;
                 }
@@ -247,9 +248,17 @@ const Pty = struct {
                 break;
             };
 
-            if (poll_fds[1].revents & posix.POLL.IN != 0) break; // Exit signal received
+            if (poll_fds[1].revents & posix.POLL.IN != 0) {
+                log.info("PTY {} received exit signal on pipe", .{self.id});
+                break;
+            }
+
+            // Check for POLLHUP on master (process closed its side)
+            if (poll_fds[0].revents & posix.POLL.HUP != 0) {
+                log.info("PTY {} master got POLLHUP", .{self.id});
+            }
         }
-        log.info("PTY read thread exiting for PTY {}", .{self.id});
+        log.info("PTY read thread exiting for PTY {} (running={})", .{ self.id, self.running.load(.seq_cst) });
 
         // Reap the child process (use WNOHANG with retries, resending SIGHUP like Ghostty)
         var status: u32 = 0;
@@ -260,7 +269,8 @@ const Pty = struct {
                 log.info("PTY {} process {} exited with status {}", .{ self.id, self.process.pid, status });
                 break;
             }
-            // Process still alive, resend SIGHUP and wait
+            // Process still alive, send SIGHUP to terminate it
+            log.info("PTY {} process {} still alive, sending SIGHUP", .{ self.id, self.process.pid });
             _ = posix.kill(-self.process.pid, posix.SIG.HUP) catch {};
             std.Thread.sleep(10 * std.time.ns_per_ms);
         }
