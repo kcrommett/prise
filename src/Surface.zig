@@ -613,7 +613,6 @@ pub fn render(self: *const Surface, win: vaxis.Window, focused: bool, terminal_c
         self.front.cursor_col < win.width and
         self.front.cursor_row < win.height)
     {
-        log.info("Surface.render: showing cursor for pty {} at {},{}", .{ self.pty_id, self.front.cursor_col, self.front.cursor_row });
         win.showCursor(self.front.cursor_col, self.front.cursor_row);
         const shape: vaxis.Cell.CursorShape = switch (self.cursor_shape) {
             .block => .block,
@@ -621,8 +620,6 @@ pub fn render(self: *const Surface, win: vaxis.Window, focused: bool, terminal_c
             .underline => .underline,
         };
         win.setCursorShape(shape);
-    } else if (focused) {
-        log.info("Surface.render: focused=true but cursor hidden/OOB for pty {}", .{self.pty_id});
     }
 }
 

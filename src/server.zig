@@ -18,12 +18,6 @@ const posix = std.posix;
 
 const log = std.log.scoped(.server);
 
-pub const std_options: std.Options = .{
-    .log_scope_levels = &.{
-        .{ .scope = .page_list, .level = .warn },
-    },
-};
-
 /// Resource limits to prevent unbounded growth in the long-running daemon.
 pub const LIMITS = struct {
     pub const CLIENTS_MAX: usize = 64;

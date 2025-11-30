@@ -9,6 +9,12 @@ const posix = std.posix;
 
 const log = std.log.scoped(.main);
 
+pub const std_options: std.Options = .{
+    .log_scope_levels = &.{
+        .{ .scope = .page_list, .level = .warn },
+    },
+};
+
 pub fn main() !void {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     const allocator, const is_debug = gpa: {

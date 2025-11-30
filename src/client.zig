@@ -1375,9 +1375,6 @@ pub const App = struct {
 
         try self.renderWidget(w, win);
 
-        // Log cursor state after render
-        log.info("App.render: cursor_vis={}", .{screen.cursor_vis});
-
         log.debug("render: calling vx.render()", .{});
         if (self.state.pty_id) |pid_i64| {
             const pid = @as(u32, @intCast(pid_i64));
