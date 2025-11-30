@@ -792,7 +792,7 @@ function M.update(event)
                 handled = true
             elseif k == "d" then
                 -- Detach from session
-                prise.detach("default")
+                prise.detach(prise.next_session_name())
                 handled = true
             elseif k == "w" then
                 -- Close current pane

@@ -199,6 +199,10 @@ pub const UI = struct {
         lua.pushFunction(ziglua.wrap(detach));
         lua.setField(-2, "detach");
 
+        // Register next_session_name
+        lua.pushFunction(ziglua.wrap(nextSessionName));
+        lua.setField(-2, "next_session_name");
+
         // Register create_text_input
         lua.pushFunction(ziglua.wrap(createTextInput));
         lua.setField(-2, "create_text_input");
@@ -299,6 +303,53 @@ pub const UI = struct {
             lua.raiseErrorStr("Detach callback not configured", .{});
         }
         return 0;
+    }
+
+    fn nextSessionName(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui = lua.toUserdata(UI, -1) catch {
+            _ = lua.pushString("0");
+            return 1;
+        };
+        lua.pop(1);
+
+        const home = std.posix.getenv("HOME") orelse {
+            _ = lua.pushString("0");
+            return 1;
+        };
+
+        const sessions_dir = std.fs.path.join(ui.allocator, &.{ home, ".local", "state", "prise", "sessions" }) catch {
+            _ = lua.pushString("0");
+            return 1;
+        };
+        defer ui.allocator.free(sessions_dir);
+
+        var dir = std.fs.openDirAbsolute(sessions_dir, .{ .iterate = true }) catch {
+            _ = lua.pushString("0");
+            return 1;
+        };
+        defer dir.close();
+
+        var used = std.AutoHashMap(u32, void).init(ui.allocator);
+        defer used.deinit();
+
+        var iter = dir.iterate();
+        while (iter.next() catch null) |entry| {
+            if (entry.kind != .file) continue;
+            const name = entry.name;
+            if (!std.mem.endsWith(u8, name, ".json")) continue;
+            const base = name[0 .. name.len - 5];
+            const num = std.fmt.parseInt(u32, base, 10) catch continue;
+            used.put(num, {}) catch continue;
+        }
+
+        var next: u32 = 0;
+        while (used.contains(next)) : (next += 1) {}
+
+        var buf: [16]u8 = undefined;
+        const name_str = std.fmt.bufPrint(&buf, "{d}", .{next}) catch "0";
+        _ = lua.pushString(name_str);
+        return 1;
     }
 
     fn logDebug(lua: *ziglua.Lua) i32 {
