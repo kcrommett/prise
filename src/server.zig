@@ -246,6 +246,9 @@ const Pty = struct {
         // Precondition: process master fd must be valid
         std.debug.assert(self.process.master >= 0);
 
+        // 4096 bytes matches typical pipe buffer size and is large enough to
+        // batch multiple VT sequences per read, reducing syscall overhead while
+        // staying small enough for stack allocation.
         var buffer: [4096]u8 = undefined;
 
         var handler = vt_handler.Handler.init(&self.terminal);
@@ -305,6 +308,9 @@ const Pty = struct {
 
                 // Notify main thread by writing to pipe
                 // Ignore EAGAIN (pipe full means already dirty)
+                // Skip signaling during synchronized_output mode (DEC mode 2026) because
+                // the application is in the middle of an atomic update. We'll render when
+                // the mode is cleared, avoiding partial/flickering frames.
                 if (!self.terminal.modes.get(.synchronized_output)) {
                     _ = posix.write(self.pipe_fds[1], "x") catch |err| {
                         if (err != error.WouldBlock) {
@@ -352,6 +358,8 @@ const Pty = struct {
                 }
             };
             // Escalate signals: SIGHUP -> SIGTERM -> SIGKILL
+            // 10ms sleep between retries gives the process time to handle the signal
+            // and exit cleanly. Shorter sleeps waste CPU; longer delays slow shutdown.
             if (attempts < 5) {
                 log.info("PTY {} process {} still alive, sending HUP", .{ self.id, self.process.pid });
                 _ = posix.kill(-self.process.pid, posix.SIG.HUP) catch {};
@@ -786,6 +794,9 @@ fn buildRedrawMessageFromPty(
 const Client = struct {
     fd: posix.fd_t,
     server: *Server,
+    // 4096 bytes is sufficient for typical RPC messages while staying
+    // small enough for stack allocation. Larger messages are handled
+    // via msg_buffer accumulation.
     recv_buffer: [4096]u8 = undefined,
     msg_buffer: std.ArrayList(u8),
     send_buffer: ?[]u8 = null,
@@ -2189,6 +2200,10 @@ const Server = struct {
                 }
 
                 const now = std.time.milliTimestamp();
+                // 8ms (~120fps) balances responsiveness with efficiency. Lower values
+                // increase CPU usage with diminishing perceptual benefit; higher values
+                // cause visible lag during fast output (e.g., `cat large_file`).
+                // See ARCHITECTURE.md "Event-Oriented Frame Scheduler".
                 const FRAME_TIME = 8;
 
                 if (now - pty_instance.last_render_time >= FRAME_TIME) {
