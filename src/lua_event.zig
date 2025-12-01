@@ -11,26 +11,30 @@ const vaxis_helper = @import("vaxis_helper.zig");
 
 const log = std.log.scoped(.lua_event);
 
+pub const PtyAttachInfo = struct {
+    id: u32,
+    surface: *Surface,
+    app: *anyopaque,
+    send_key_fn: *const fn (app: *anyopaque, id: u32, key: KeyData) anyerror!void,
+    send_mouse_fn: *const fn (app: *anyopaque, id: u32, mouse: MouseData) anyerror!void,
+    send_paste_fn: *const fn (app: *anyopaque, id: u32, data: []const u8) anyerror!void,
+    set_focus_fn: *const fn (app: *anyopaque, id: u32, focused: bool) anyerror!void,
+    close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
+    cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
+};
+
+pub const PtyExitedInfo = struct {
+    id: u32,
+    status: u32,
+};
+
 pub const Event = union(enum) {
     vaxis: vaxis.Event,
     mouse: MouseEvent,
     split_resize: SplitResizeEvent,
     paste: []const u8,
-    pty_attach: struct {
-        id: u32,
-        surface: *Surface,
-        app: *anyopaque,
-        send_key_fn: *const fn (app: *anyopaque, id: u32, key: KeyData) anyerror!void,
-        send_mouse_fn: *const fn (app: *anyopaque, id: u32, mouse: MouseData) anyerror!void,
-        send_paste_fn: *const fn (app: *anyopaque, id: u32, data: []const u8) anyerror!void,
-        set_focus_fn: *const fn (app: *anyopaque, id: u32, focused: bool) anyerror!void,
-        close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
-        cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
-    },
-    pty_exited: struct {
-        id: u32,
-        status: u32,
-    },
+    pty_attach: PtyAttachInfo,
+    pty_exited: PtyExitedInfo,
     init: void,
 };
 
@@ -84,252 +88,266 @@ pub fn pushEvent(lua: *ziglua.Lua, event: Event) !void {
     lua.createTable(0, 2);
 
     switch (event) {
-        .init => {
-            _ = lua.pushString("init");
-            lua.setField(-2, "type");
-        },
-        .pty_attach => |info| {
-            log.info("pushEvent: pty_attach id={}", .{info.id});
-            _ = lua.pushString("pty_attach");
-            lua.setField(-2, "type");
-
-            lua.createTable(0, 1);
-
-            const pty = lua.newUserdata(PtyHandle, @sizeOf(PtyHandle));
-            pty.* = .{
-                .id = info.id,
-                .surface = info.surface,
-                .app = info.app,
-                .send_key_fn = info.send_key_fn,
-                .send_mouse_fn = info.send_mouse_fn,
-                .send_paste_fn = info.send_paste_fn,
-                .set_focus_fn = info.set_focus_fn,
-                .close_fn = info.close_fn,
-                .cwd_fn = info.cwd_fn,
-            };
-
-            _ = lua.getMetatableRegistry("PrisePty");
-            lua.setMetatable(-2);
-
-            lua.setField(-2, "pty");
-
-            lua.setField(-2, "data");
-            log.info("pushEvent: pty_attach done", .{});
-        },
-
-        .pty_exited => |info| {
-            _ = lua.pushString("pty_exited");
-            lua.setField(-2, "type");
-
-            lua.createTable(0, 2);
-            lua.pushInteger(@intCast(info.id));
-            lua.setField(-2, "id");
-            lua.pushInteger(@intCast(info.status));
-            lua.setField(-2, "status");
-            lua.setField(-2, "data");
-        },
-
-        .paste => |data| {
-            _ = lua.pushString("paste");
-            lua.setField(-2, "type");
-
-            lua.createTable(0, 1);
-            _ = lua.pushString(data);
-            lua.setField(-2, "text");
-            lua.setField(-2, "data");
-        },
-
-        .split_resize => |sr| {
-            _ = lua.pushString("split_resize");
-            lua.setField(-2, "type");
-
-            lua.createTable(0, 3);
-
-            if (sr.parent_id) |pid| {
-                lua.pushInteger(@intCast(pid));
-                lua.setField(-2, "parent_id");
-            }
-
-            lua.pushInteger(@intCast(sr.child_index));
-            lua.setField(-2, "child_index");
-
-            lua.pushNumber(@floatCast(sr.ratio));
-            lua.setField(-2, "ratio");
-
-            lua.setField(-2, "data");
-        },
-
-        .mouse => |m| {
-            _ = lua.pushString("mouse");
-            lua.setField(-2, "type");
-
-            lua.createTable(0, 8);
-
-            lua.pushNumber(m.x);
-            lua.setField(-2, "x");
-
-            lua.pushNumber(m.y);
-            lua.setField(-2, "y");
-
-            switch (m.button) {
-                .left => _ = lua.pushString("left"),
-                .middle => _ = lua.pushString("middle"),
-                .right => _ = lua.pushString("right"),
-                .wheel_up => _ = lua.pushString("wheel_up"),
-                .wheel_down => _ = lua.pushString("wheel_down"),
-                .wheel_left => _ = lua.pushString("wheel_left"),
-                .wheel_right => _ = lua.pushString("wheel_right"),
-                else => _ = lua.pushString("none"),
-            }
-            lua.setField(-2, "button");
-
-            switch (m.action) {
-                .press => _ = lua.pushString("press"),
-                .release => _ = lua.pushString("release"),
-                .motion => _ = lua.pushString("motion"),
-                .drag => _ = lua.pushString("drag"),
-            }
-            lua.setField(-2, "action");
-
-            lua.createTable(0, 3);
-            lua.pushBoolean(m.mods.ctrl);
-            lua.setField(-2, "ctrl");
-            lua.pushBoolean(m.mods.alt);
-            lua.setField(-2, "alt");
-            lua.pushBoolean(m.mods.shift);
-            lua.setField(-2, "shift");
-            lua.setField(-2, "mods");
-
-            if (m.target) |target| {
-                lua.pushInteger(@intCast(target));
-                lua.setField(-2, "target");
-
-                if (m.target_x) |tx| {
-                    lua.pushNumber(tx);
-                    lua.setField(-2, "target_x");
-                }
-                if (m.target_y) |ty| {
-                    lua.pushNumber(ty);
-                    lua.setField(-2, "target_y");
-                }
-            }
-
-            lua.setField(-2, "data");
-        },
-
-        .vaxis => |vaxis_event| switch (vaxis_event) {
-            .key_press, .key_release => |key| {
-                if (vaxis_event == .key_press) {
-                    _ = lua.pushString("key_press");
-                } else {
-                    _ = lua.pushString("key_release");
-                }
-                lua.setField(-2, "type");
-
-                lua.createTable(0, 6);
-
-                var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-                defer arena.deinit();
-                const key_strs = vaxis_helper.vaxisKeyToStrings(arena.allocator(), key) catch vaxis_helper.KeyStrings{ .key = "Unidentified", .code = "Unidentified" };
-
-                _ = lua.pushString(key_strs.key);
-                lua.setField(-2, "key");
-
-                _ = lua.pushString(key_strs.code);
-                lua.setField(-2, "code");
-
-                lua.pushBoolean(key.mods.ctrl);
-                lua.setField(-2, "ctrl");
-
-                lua.pushBoolean(key.mods.alt);
-                lua.setField(-2, "alt");
-
-                lua.pushBoolean(key.mods.shift);
-                lua.setField(-2, "shift");
-
-                lua.pushBoolean(key.mods.super);
-                lua.setField(-2, "super");
-
-                lua.setField(-2, "data");
-            },
-
-            .winsize => |ws| {
-                _ = lua.pushString("winsize");
-                lua.setField(-2, "type");
-
-                lua.createTable(0, 4);
-                lua.pushInteger(@intCast(ws.rows));
-                lua.setField(-2, "rows");
-                lua.pushInteger(@intCast(ws.cols));
-                lua.setField(-2, "cols");
-                lua.pushInteger(@intCast(ws.x_pixel));
-                lua.setField(-2, "width");
-                lua.pushInteger(@intCast(ws.y_pixel));
-                lua.setField(-2, "height");
-
-                lua.setField(-2, "data");
-            },
-
-            .mouse => |mouse| {
-                _ = lua.pushString("mouse");
-                lua.setField(-2, "type");
-
-                lua.createTable(0, 5);
-
-                lua.pushInteger(@intCast(mouse.col));
-                lua.setField(-2, "col");
-
-                lua.pushInteger(@intCast(mouse.row));
-                lua.setField(-2, "row");
-
-                switch (mouse.button) {
-                    .left => _ = lua.pushString("left"),
-                    .middle => _ = lua.pushString("middle"),
-                    .right => _ = lua.pushString("right"),
-                    .wheel_up => _ = lua.pushString("wheel_up"),
-                    .wheel_down => _ = lua.pushString("wheel_down"),
-                    .wheel_left => _ = lua.pushString("wheel_left"),
-                    .wheel_right => _ = lua.pushString("wheel_right"),
-                    else => _ = lua.pushString("none"),
-                }
-                lua.setField(-2, "button");
-
-                switch (mouse.type) {
-                    .press => _ = lua.pushString("press"),
-                    .release => _ = lua.pushString("release"),
-                    .motion => _ = lua.pushString("motion"),
-                    .drag => _ = lua.pushString("drag"),
-                }
-                lua.setField(-2, "event_type");
-
-                lua.createTable(0, 3);
-                lua.pushBoolean(mouse.mods.ctrl);
-                lua.setField(-2, "ctrl");
-                lua.pushBoolean(mouse.mods.alt);
-                lua.setField(-2, "alt");
-                lua.pushBoolean(mouse.mods.shift);
-                lua.setField(-2, "shift");
-                lua.setField(-2, "mods");
-
-                lua.setField(-2, "data");
-            },
-
-            .focus_in => {
-                _ = lua.pushString("focus_in");
-                lua.setField(-2, "type");
-            },
-
-            .focus_out => {
-                _ = lua.pushString("focus_out");
-                lua.setField(-2, "type");
-            },
-
-            else => {
-                _ = lua.pushString("unknown");
-                lua.setField(-2, "type");
-            },
-        },
+        .init => pushInitEvent(lua),
+        .pty_attach => |info| pushPtyAttachEvent(lua, info),
+        .pty_exited => |info| pushPtyExitedEvent(lua, info),
+        .paste => |data| pushPasteEvent(lua, data),
+        .split_resize => |sr| pushSplitResizeEvent(lua, sr),
+        .mouse => |m| pushMouseEvent(lua, m),
+        .vaxis => |vaxis_event| pushVaxisEvent(lua, vaxis_event),
     }
+}
+
+fn pushInitEvent(lua: *ziglua.Lua) void {
+    _ = lua.pushString("init");
+    lua.setField(-2, "type");
+}
+
+fn pushPtyAttachEvent(lua: *ziglua.Lua, info: PtyAttachInfo) void {
+    log.info("pushEvent: pty_attach id={}", .{info.id});
+    _ = lua.pushString("pty_attach");
+    lua.setField(-2, "type");
+
+    lua.createTable(0, 1);
+
+    const pty = lua.newUserdata(PtyHandle, @sizeOf(PtyHandle));
+    pty.* = .{
+        .id = info.id,
+        .surface = info.surface,
+        .app = info.app,
+        .send_key_fn = info.send_key_fn,
+        .send_mouse_fn = info.send_mouse_fn,
+        .send_paste_fn = info.send_paste_fn,
+        .set_focus_fn = info.set_focus_fn,
+        .close_fn = info.close_fn,
+        .cwd_fn = info.cwd_fn,
+    };
+
+    _ = lua.getMetatableRegistry("PrisePty");
+    lua.setMetatable(-2);
+
+    lua.setField(-2, "pty");
+
+    lua.setField(-2, "data");
+    log.info("pushEvent: pty_attach done", .{});
+}
+
+fn pushPtyExitedEvent(lua: *ziglua.Lua, info: PtyExitedInfo) void {
+    _ = lua.pushString("pty_exited");
+    lua.setField(-2, "type");
+
+    lua.createTable(0, 2);
+    lua.pushInteger(@intCast(info.id));
+    lua.setField(-2, "id");
+    lua.pushInteger(@intCast(info.status));
+    lua.setField(-2, "status");
+    lua.setField(-2, "data");
+}
+
+fn pushPasteEvent(lua: *ziglua.Lua, data: []const u8) void {
+    _ = lua.pushString("paste");
+    lua.setField(-2, "type");
+
+    lua.createTable(0, 1);
+    _ = lua.pushString(data);
+    lua.setField(-2, "text");
+    lua.setField(-2, "data");
+}
+
+fn pushSplitResizeEvent(lua: *ziglua.Lua, sr: SplitResizeEvent) void {
+    _ = lua.pushString("split_resize");
+    lua.setField(-2, "type");
+
+    lua.createTable(0, 3);
+
+    if (sr.parent_id) |pid| {
+        lua.pushInteger(@intCast(pid));
+        lua.setField(-2, "parent_id");
+    }
+
+    lua.pushInteger(@intCast(sr.child_index));
+    lua.setField(-2, "child_index");
+
+    lua.pushNumber(@floatCast(sr.ratio));
+    lua.setField(-2, "ratio");
+
+    lua.setField(-2, "data");
+}
+
+fn pushMouseEvent(lua: *ziglua.Lua, m: MouseEvent) void {
+    _ = lua.pushString("mouse");
+    lua.setField(-2, "type");
+
+    lua.createTable(0, 8);
+
+    lua.pushNumber(m.x);
+    lua.setField(-2, "x");
+
+    lua.pushNumber(m.y);
+    lua.setField(-2, "y");
+
+    pushMouseButton(lua, m.button);
+    lua.setField(-2, "button");
+
+    pushMouseAction(lua, m.action);
+    lua.setField(-2, "action");
+
+    pushModifiers(lua, m.mods.ctrl, m.mods.alt, m.mods.shift);
+    lua.setField(-2, "mods");
+
+    if (m.target) |target| {
+        lua.pushInteger(@intCast(target));
+        lua.setField(-2, "target");
+
+        if (m.target_x) |tx| {
+            lua.pushNumber(tx);
+            lua.setField(-2, "target_x");
+        }
+        if (m.target_y) |ty| {
+            lua.pushNumber(ty);
+            lua.setField(-2, "target_y");
+        }
+    }
+
+    lua.setField(-2, "data");
+}
+
+fn pushVaxisEvent(lua: *ziglua.Lua, vaxis_event: vaxis.Event) void {
+    switch (vaxis_event) {
+        .key_press, .key_release => |key| pushKeyEvent(lua, vaxis_event, key),
+        .winsize => |ws| pushWinsizeEvent(lua, ws),
+        .mouse => |mouse| pushVaxisMouseEvent(lua, mouse),
+        .focus_in => pushFocusEvent(lua, "focus_in"),
+        .focus_out => pushFocusEvent(lua, "focus_out"),
+        else => pushUnknownEvent(lua),
+    }
+}
+
+fn pushKeyEvent(lua: *ziglua.Lua, vaxis_event: vaxis.Event, key: vaxis.Key) void {
+    if (vaxis_event == .key_press) {
+        _ = lua.pushString("key_press");
+    } else {
+        _ = lua.pushString("key_release");
+    }
+    lua.setField(-2, "type");
+
+    lua.createTable(0, 6);
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const key_strs = vaxis_helper.vaxisKeyToStrings(arena.allocator(), key) catch vaxis_helper.KeyStrings{ .key = "Unidentified", .code = "Unidentified" };
+
+    _ = lua.pushString(key_strs.key);
+    lua.setField(-2, "key");
+
+    _ = lua.pushString(key_strs.code);
+    lua.setField(-2, "code");
+
+    lua.pushBoolean(key.mods.ctrl);
+    lua.setField(-2, "ctrl");
+
+    lua.pushBoolean(key.mods.alt);
+    lua.setField(-2, "alt");
+
+    lua.pushBoolean(key.mods.shift);
+    lua.setField(-2, "shift");
+
+    lua.pushBoolean(key.mods.super);
+    lua.setField(-2, "super");
+
+    lua.setField(-2, "data");
+}
+
+fn pushWinsizeEvent(lua: *ziglua.Lua, ws: vaxis.Winsize) void {
+    _ = lua.pushString("winsize");
+    lua.setField(-2, "type");
+
+    lua.createTable(0, 4);
+    lua.pushInteger(@intCast(ws.rows));
+    lua.setField(-2, "rows");
+    lua.pushInteger(@intCast(ws.cols));
+    lua.setField(-2, "cols");
+    lua.pushInteger(@intCast(ws.x_pixel));
+    lua.setField(-2, "width");
+    lua.pushInteger(@intCast(ws.y_pixel));
+    lua.setField(-2, "height");
+
+    lua.setField(-2, "data");
+}
+
+fn pushVaxisMouseEvent(lua: *ziglua.Lua, mouse: vaxis.Mouse) void {
+    _ = lua.pushString("mouse");
+    lua.setField(-2, "type");
+
+    lua.createTable(0, 5);
+
+    lua.pushInteger(@intCast(mouse.col));
+    lua.setField(-2, "col");
+
+    lua.pushInteger(@intCast(mouse.row));
+    lua.setField(-2, "row");
+
+    pushMouseButton(lua, mouse.button);
+    lua.setField(-2, "button");
+
+    pushMouseType(lua, mouse.type);
+    lua.setField(-2, "event_type");
+
+    pushModifiers(lua, mouse.mods.ctrl, mouse.mods.alt, mouse.mods.shift);
+    lua.setField(-2, "mods");
+
+    lua.setField(-2, "data");
+}
+
+fn pushFocusEvent(lua: *ziglua.Lua, event_type: [:0]const u8) void {
+    _ = lua.pushString(event_type);
+    lua.setField(-2, "type");
+}
+
+fn pushUnknownEvent(lua: *ziglua.Lua) void {
+    _ = lua.pushString("unknown");
+    lua.setField(-2, "type");
+}
+
+fn pushMouseButton(lua: *ziglua.Lua, button: vaxis.Mouse.Button) void {
+    switch (button) {
+        .left => _ = lua.pushString("left"),
+        .middle => _ = lua.pushString("middle"),
+        .right => _ = lua.pushString("right"),
+        .wheel_up => _ = lua.pushString("wheel_up"),
+        .wheel_down => _ = lua.pushString("wheel_down"),
+        .wheel_left => _ = lua.pushString("wheel_left"),
+        .wheel_right => _ = lua.pushString("wheel_right"),
+        else => _ = lua.pushString("none"),
+    }
+}
+
+fn pushMouseAction(lua: *ziglua.Lua, action: vaxis.Mouse.Type) void {
+    switch (action) {
+        .press => _ = lua.pushString("press"),
+        .release => _ = lua.pushString("release"),
+        .motion => _ = lua.pushString("motion"),
+        .drag => _ = lua.pushString("drag"),
+    }
+}
+
+fn pushMouseType(lua: *ziglua.Lua, mouse_type: vaxis.Mouse.Type) void {
+    switch (mouse_type) {
+        .press => _ = lua.pushString("press"),
+        .release => _ = lua.pushString("release"),
+        .motion => _ = lua.pushString("motion"),
+        .drag => _ = lua.pushString("drag"),
+    }
+}
+
+fn pushModifiers(lua: *ziglua.Lua, ctrl: bool, alt: bool, shift: bool) void {
+    lua.createTable(0, 3);
+    lua.pushBoolean(ctrl);
+    lua.setField(-2, "ctrl");
+    lua.pushBoolean(alt);
+    lua.setField(-2, "alt");
+    lua.pushBoolean(shift);
+    lua.setField(-2, "shift");
 }
 
 const PtyHandle = struct {
