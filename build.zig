@@ -44,6 +44,10 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    b.installFile("completions/prise.fish", "share/fish/vendor_completions.d/prise.fish");
+    b.installFile("completions/prise.bash", "share/bash-completion/completions/prise");
+    b.installFile("completions/prise.zsh", "share/zsh/site-functions/_prise");
+
     const os = @import("builtin").os.tag;
     if (os.isDarwin()) {
         const plist = b.addWriteFiles();
