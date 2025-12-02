@@ -218,20 +218,39 @@ pub const UI = struct {
             try used.put(base, {});
         }
 
-        // Find first unused name from the list
+        // Collect unused names and pick one randomly
+        var unused_names: [AMORY_NAMES.len][]const u8 = undefined;
+        var unused_count: usize = 0;
         for (AMORY_NAMES) |name| {
             if (!used.contains(name)) {
-                return self.allocator.dupe(u8, name);
+                unused_names[unused_count] = name;
+                unused_count += 1;
             }
         }
+        if (unused_count > 0) {
+            var prng = std.Random.DefaultPrng.init(@bitCast(std.time.timestamp()));
+            const idx = prng.random().uintLessThan(usize, unused_count);
+            return self.allocator.dupe(u8, unused_names[idx]);
+        }
 
-        // All names used - append number to first name
+        // All names used - try all names with suffix -2, then -3, etc.
+        var prng = std.Random.DefaultPrng.init(@bitCast(std.time.timestamp()));
         var suffix: u32 = 2;
         var buf: [32]u8 = undefined;
         while (suffix < 1000) : (suffix += 1) {
-            const suffixed = std.fmt.bufPrint(&buf, "{s}-{d}", .{ AMORY_NAMES[0], suffix }) catch break;
-            if (!used.contains(suffixed)) {
-                return self.allocator.dupe(u8, suffixed);
+            var unused_suffixed: [AMORY_NAMES.len][]const u8 = undefined;
+            var suffixed_count: usize = 0;
+            for (AMORY_NAMES) |name| {
+                const suffixed = std.fmt.bufPrint(&buf, "{s}-{d}", .{ name, suffix }) catch continue;
+                if (!used.contains(suffixed)) {
+                    unused_suffixed[suffixed_count] = name;
+                    suffixed_count += 1;
+                }
+            }
+            if (suffixed_count > 0) {
+                const idx = prng.random().uintLessThan(usize, suffixed_count);
+                const chosen = std.fmt.bufPrint(&buf, "{s}-{d}", .{ unused_suffixed[idx], suffix }) catch break;
+                return self.allocator.dupe(u8, chosen);
             }
         }
 
