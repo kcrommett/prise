@@ -2140,26 +2140,38 @@ pub const App = struct {
                                 app.state.next_msgid += 1;
                                 try app.state.pending_requests.put(msgid, .spawn);
 
-                                // Build spawn_pty params with optional cwd
-                                var params = try app.allocator.alloc(msgpack.Value, if (info.cwd != null) 1 else 0);
+                                // Build env array from current process environment
+                                var env_map = try std.process.getEnvMap(app.allocator);
+                                defer env_map.deinit();
+
+                                var env_array = std.ArrayList(msgpack.Value).empty;
+                                defer env_array.deinit(app.allocator);
+                                var env_it = env_map.iterator();
+                                while (env_it.next()) |entry| {
+                                    const env_str = try std.fmt.allocPrint(app.allocator, "{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
+                                    try env_array.append(app.allocator, .{ .string = env_str });
+                                }
+
+                                // Build spawn_pty params with env and optional cwd
+                                const param_count: usize = if (info.cwd != null) 2 else 1;
+                                var kv = try app.allocator.alloc(msgpack.Value.KeyValue, param_count);
+                                defer app.allocator.free(kv);
+                                kv[0] = .{ .key = .{ .string = "env" }, .value = .{ .array = env_array.items } };
                                 if (info.cwd) |cwd| {
                                     if (cwd.len > 0) {
-                                        var kv = try app.allocator.alloc(msgpack.Value.KeyValue, 1);
-                                        kv[0] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
-                                        params[0] = .{ .map = kv };
+                                        kv[1] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
                                     }
                                 }
 
                                 var arr = try app.allocator.alloc(msgpack.Value, 4);
+                                defer app.allocator.free(arr);
                                 arr[0] = .{ .unsigned = 0 };
                                 arr[1] = .{ .unsigned = msgid };
                                 arr[2] = .{ .string = "spawn_pty" };
-                                arr[3] = .{ .array = params };
+                                arr[3] = .{ .map = kv };
 
                                 const encoded = try msgpack.encodeFromValue(app.allocator, msgpack.Value{ .array = arr });
                                 defer app.allocator.free(encoded);
-                                app.allocator.free(arr);
-                                app.allocator.free(params);
 
                                 try app.sendDirect(encoded);
                             },
@@ -2258,15 +2270,28 @@ pub const App = struct {
         log.info("spawnPty: sending request msgid={}", .{msgid});
         try self.state.pending_requests.put(msgid, .spawn);
 
-        const num_params: usize = if (opts.cwd != null) 4 else 3;
+        // Build env array from current process environment
+        var env_map = try std.process.getEnvMap(self.allocator);
+        defer env_map.deinit();
+
+        var env_array = std.ArrayList(msgpack.Value).empty;
+        defer env_array.deinit(self.allocator);
+        var env_it = env_map.iterator();
+        while (env_it.next()) |entry| {
+            const env_str = try std.fmt.allocPrint(self.allocator, "{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
+            try env_array.append(self.allocator, .{ .string = env_str });
+        }
+
+        const num_params: usize = if (opts.cwd != null) 5 else 4;
         var map_items = try self.allocator.alloc(msgpack.Value.KeyValue, num_params);
         defer self.allocator.free(map_items);
 
         map_items[0] = .{ .key = .{ .string = "rows" }, .value = .{ .unsigned = opts.rows } };
         map_items[1] = .{ .key = .{ .string = "cols" }, .value = .{ .unsigned = opts.cols } };
         map_items[2] = .{ .key = .{ .string = "attach" }, .value = .{ .boolean = opts.attach } };
+        map_items[3] = .{ .key = .{ .string = "env" }, .value = .{ .array = env_array.items } };
         if (opts.cwd) |cwd| {
-            map_items[3] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
+            map_items[4] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
         }
 
         const params = msgpack.Value{ .map = map_items };
