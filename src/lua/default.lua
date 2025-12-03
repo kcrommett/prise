@@ -15,6 +15,12 @@ local prise = require("prise")
 
 ---@alias Node Pane|Split
 
+---@class Tab
+---@field id integer
+---@field title? string
+---@field root? Node
+---@field last_focused_id? number
+
 ---@class PaletteState
 ---@field visible boolean
 ---@field input? userdata
@@ -22,11 +28,14 @@ local prise = require("prise")
 ---@field scroll_offset number
 
 ---@class State
----@field root? Node
+---@field tabs Tab[]
+---@field active_tab integer
+---@field next_tab_id integer
 ---@field focused_id? number
 ---@field pending_command boolean
 ---@field timer? userdata
 ---@field pending_split? { direction: "row"|"col" }
+---@field pending_new_tab? boolean
 ---@field next_split_id number
 ---@field palette PaletteState
 
@@ -64,12 +73,15 @@ local THEME = {
 }
 
 local state = {
-    root = nil,
+    tabs = {},
+    active_tab = 1,
+    next_tab_id = 1,
     focused_id = nil,
     app_focused = true,
     pending_command = false,
     timer = nil,
     pending_split = nil,
+    pending_new_tab = false,
     next_split_id = 1,
     -- Command palette
     palette = {
@@ -98,12 +110,59 @@ local function is_split(node)
     return node and node.type == "split"
 end
 
+---Get the currently active tab
+---@return Tab?
+local function get_active_tab()
+    return state.tabs[state.active_tab]
+end
+
+---Get the root node of the active tab
+---@return Node?
+local function get_active_root()
+    local tab = get_active_tab()
+    return tab and tab.root or nil
+end
+
+---Forward declaration for find_node_path
+local find_node_path
+
+---Find which tab contains a pane by id
+---@param pane_id number
+---@return integer?, Tab?
+local function find_tab_for_pane(pane_id)
+    for i, tab in ipairs(state.tabs) do
+        if find_node_path(tab.root, pane_id) then
+            return i, tab
+        end
+    end
+    return nil
+end
+
+---Collect all panes in a node tree
+---@param node? Node
+---@param acc? Pane[]
+---@return Pane[]
+local function collect_panes(node, acc)
+    acc = acc or {}
+    if not node then
+        return acc
+    end
+    if is_pane(node) then
+        table.insert(acc, node)
+    elseif is_split(node) then
+        for _, child in ipairs(node.children) do
+            collect_panes(child, acc)
+        end
+    end
+    return acc
+end
+
 ---Returns a list of nodes from root to the target node [root, ..., target]
 ---@param current? Node
 ---@param target_id number
 ---@param path? Node[]
 ---@return Node[]?
-local function find_node_path(current, target_id, path)
+find_node_path = function(current, target_id, path)
     path = path or {}
     if not current then
         return nil
@@ -261,10 +320,11 @@ end
 
 ---@return userdata?
 local function get_focused_pty()
-    if not state.focused_id or not state.root then
+    local root = get_active_root()
+    if not state.focused_id or not root then
         return nil
     end
-    local path = find_node_path(state.root, state.focused_id)
+    local path = find_node_path(root, state.focused_id)
     if path then
         return path[#path].pty
     end
@@ -275,37 +335,174 @@ local function update_pty_focus(old_id, new_id)
     if old_id == new_id then
         return
     end
-    if old_id and state.root then
-        local old_path = find_node_path(state.root, old_id)
-        if old_path then
-            old_path[#old_path].pty:set_focus(false)
+    if old_id then
+        local _, old_tab = find_tab_for_pane(old_id)
+        if old_tab then
+            local old_path = find_node_path(old_tab.root, old_id)
+            if old_path then
+                old_path[#old_path].pty:set_focus(false)
+            end
         end
     end
-    if new_id and state.root and state.app_focused then
-        local new_path = find_node_path(state.root, new_id)
-        if new_path then
-            new_path[#new_path].pty:set_focus(true)
+    if new_id and state.app_focused then
+        local _, new_tab = find_tab_for_pane(new_id)
+        if new_tab then
+            local new_path = find_node_path(new_tab.root, new_id)
+            if new_path then
+                new_path[#new_path].pty:set_focus(true)
+            end
         end
     end
 end
 
----Remove a pane by id
----@param id number
----@return boolean was_last True if this was the last pane (app will quit)
-local function remove_pane_by_id(id)
-    local new_root, next_focus = remove_pane_recursive(state.root, id)
-    state.root = new_root
+---Switch to a different tab by index
+---@param new_index integer
+local function set_active_tab_index(new_index)
+    if new_index < 1 or new_index > #state.tabs then
+        return
+    end
+    if new_index == state.active_tab then
+        return
+    end
 
-    if not state.root then
+    local old_tab = state.tabs[state.active_tab]
+    local old_focused = state.focused_id
+
+    -- Remember focus in old tab
+    if old_tab then
+        old_tab.last_focused_id = state.focused_id
+    end
+
+    state.active_tab = new_index
+    local new_tab = state.tabs[new_index]
+    if not new_tab then
+        return
+    end
+
+    -- Pick new focused pane in this tab
+    local new_focus_id = new_tab.last_focused_id
+    if not new_focus_id or not find_node_path(new_tab.root, new_focus_id) then
+        local first_pane = get_first_leaf(new_tab.root)
+        new_focus_id = first_pane and first_pane.id or nil
+    end
+
+    state.focused_id = new_focus_id
+    update_pty_focus(old_focused, new_focus_id)
+    prise.request_frame()
+end
+
+---Close the current tab
+local function close_current_tab()
+    if #state.tabs == 0 then
+        return
+    end
+
+    local idx = state.active_tab
+    local tab = state.tabs[idx]
+    if not tab then
+        return
+    end
+
+    -- If this is the last tab, quit the app
+    if #state.tabs == 1 then
+        local panes = collect_panes(tab.root, {})
+        for _, pane in ipairs(panes) do
+            if pane.pty and pane.pty.close then
+                pane.pty:close()
+            end
+        end
         prise.quit()
-        return true
+        return
+    end
+
+    -- Close all PTYs in this tab
+    local panes = collect_panes(tab.root, {})
+    for _, pane in ipairs(panes) do
+        if pane.pty and pane.pty.close then
+            pane.pty:close()
+        end
+    end
+
+    local old_focused = state.focused_id
+    table.remove(state.tabs, idx)
+
+    -- Pick new active tab index
+    if idx > #state.tabs then
+        idx = #state.tabs
+    end
+    state.active_tab = idx > 0 and idx or 1
+
+    local new_tab = state.tabs[state.active_tab]
+    if new_tab then
+        -- Choose focused pane in new tab
+        local new_focus_id = new_tab.last_focused_id
+        if not new_focus_id or not find_node_path(new_tab.root, new_focus_id) then
+            local first_pane = get_first_leaf(new_tab.root)
+            new_focus_id = first_pane and first_pane.id or nil
+        end
+        state.focused_id = new_focus_id
+        update_pty_focus(old_focused, new_focus_id)
     else
+        -- No tabs left
+        state.focused_id = nil
+    end
+
+    prise.request_frame()
+    prise.save()
+end
+
+---Remove a pane by id from the appropriate tab
+---@param id number
+---@return boolean was_last True if this was the last pane in the last tab (app will quit)
+local function remove_pane_by_id(id)
+    local tab_idx, tab = find_tab_for_pane(id)
+    if not tab then
+        return false
+    end
+
+    local new_root, next_focus = remove_pane_recursive(tab.root, id)
+    tab.root = new_root
+
+    if not tab.root then
+        -- Tab is now empty, remove it
+        if #state.tabs == 1 then
+            table.remove(state.tabs, tab_idx)
+            prise.quit()
+            return true
+        else
+            local old_focused = state.focused_id
+            table.remove(state.tabs, tab_idx)
+
+            -- Adjust active_tab if needed
+            if state.active_tab > #state.tabs then
+                state.active_tab = #state.tabs
+            end
+            if state.active_tab < 1 then
+                state.active_tab = 1
+            end
+
+            -- Update focus to new active tab
+            local new_tab = state.tabs[state.active_tab]
+            if new_tab then
+                local new_focus_id = new_tab.last_focused_id
+                if not new_focus_id or not find_node_path(new_tab.root, new_focus_id) then
+                    local first_pane = get_first_leaf(new_tab.root)
+                    new_focus_id = first_pane and first_pane.id or nil
+                end
+                state.focused_id = new_focus_id
+                update_pty_focus(old_focused, new_focus_id)
+            end
+            prise.request_frame()
+            return false
+        end
+    else
+        -- Tab still has panes
         if state.focused_id == id then
             local old_id = state.focused_id
             if next_focus then
                 state.focused_id = next_focus
             else
-                local first = get_first_leaf(state.root)
+                local first = get_first_leaf(tab.root)
                 if first then
                     state.focused_id = first.id
                 end
@@ -337,11 +534,12 @@ local function count_panes(node)
     return 0
 end
 
----Get index of focused pane (1-based) and total count
+---Get index of focused pane (1-based) and total count in active tab
 ---@return number index
 ---@return number total
 local function get_pane_position()
-    if not state.root or not state.focused_id then
+    local root = get_active_root()
+    if not root or not state.focused_id then
         return 1, 1
     end
 
@@ -361,7 +559,7 @@ local function get_pane_position()
         end
     end
 
-    walk(state.root)
+    walk(root)
     return found_index, index
 end
 
@@ -450,11 +648,12 @@ end
 ---@param dimension "width"|"height"
 ---@param delta_ratio number
 local function resize_pane(dimension, delta_ratio)
-    if not state.focused_id or not state.root then
+    local root = get_active_root()
+    if not state.focused_id or not root then
         return
     end
 
-    local path = find_node_path(state.root, state.focused_id)
+    local path = find_node_path(root, state.focused_id)
     if not path then
         return
     end
@@ -506,11 +705,12 @@ end
 
 ---@param direction "left"|"right"|"up"|"down"
 local function move_focus(direction)
-    if not state.focused_id or not state.root then
+    local root = get_active_root()
+    if not state.focused_id or not root then
         return
     end
 
-    local path = find_node_path(state.root, state.focused_id)
+    local path = find_node_path(root, state.focused_id)
     if not path then
         return
     end
@@ -631,7 +831,8 @@ local commands = {
     {
         name = "Close Pane",
         action = function()
-            local path = state.focused_id and find_node_path(state.root, state.focused_id)
+            local root = get_active_root()
+            local path = state.focused_id and find_node_path(root, state.focused_id)
             if path then
                 local pane = path[#path]
                 pane.pty:close()
@@ -639,6 +840,38 @@ local commands = {
                 if not was_last then
                     prise.save()
                 end
+            end
+        end,
+    },
+    {
+        name = "New Tab",
+        action = function()
+            local pty = get_focused_pty()
+            state.pending_new_tab = true
+            prise.spawn({ cwd = pty and pty:cwd() })
+        end,
+    },
+    {
+        name = "Close Tab",
+        action = function()
+            close_current_tab()
+        end,
+    },
+    {
+        name = "Next Tab",
+        action = function()
+            if #state.tabs > 1 then
+                local next_idx = state.active_tab % #state.tabs + 1
+                set_active_tab_index(next_idx)
+            end
+        end,
+    },
+    {
+        name = "Previous Tab",
+        action = function()
+            if #state.tabs > 1 then
+                local prev_idx = (state.active_tab - 2 + #state.tabs) % #state.tabs + 1
+                set_active_tab_index(prev_idx)
             end
         end,
     },
@@ -706,28 +939,53 @@ function M.update(event)
         local new_pane = { type = "pane", pty = pty, id = pty:id() }
         local old_focused_id = state.focused_id
 
-        if not state.root then
-            -- First terminal
-            state.root = new_pane
+        if state.pending_new_tab then
+            -- Create a new tab with this pane
+            state.pending_new_tab = false
+            local tab_id = state.next_tab_id
+            state.next_tab_id = tab_id + 1
+            local new_tab = {
+                id = tab_id,
+                root = new_pane,
+                last_focused_id = new_pane.id,
+            }
+            table.insert(state.tabs, new_tab)
+            set_active_tab_index(#state.tabs)
+        elseif #state.tabs == 0 then
+            -- First terminal - create first tab
+            local tab_id = state.next_tab_id
+            state.next_tab_id = tab_id + 1
+            local new_tab = {
+                id = tab_id,
+                root = new_pane,
+                last_focused_id = new_pane.id,
+            }
+            table.insert(state.tabs, new_tab)
+            state.active_tab = 1
             state.focused_id = new_pane.id
         else
-            -- Insert into tree
+            -- Insert into active tab's tree
+            local tab = get_active_tab()
+            if not tab then
+                return
+            end
+
             local direction = (state.pending_split and state.pending_split.direction) or "row"
 
             if state.focused_id then
-                state.root = insert_split_recursive(state.root, state.focused_id, new_pane, direction)
+                tab.root = insert_split_recursive(tab.root, state.focused_id, new_pane, direction)
             else
                 -- Fallback
-                if is_split(state.root) then
-                    table.insert(state.root.children, new_pane)
+                if is_split(tab.root) then
+                    table.insert(tab.root.children, new_pane)
                 else
                     local split_id = state.next_split_id
                     state.next_split_id = state.next_split_id + 1
-                    state.root = {
+                    tab.root = {
                         type = "split",
                         split_id = split_id,
                         direction = direction,
-                        children = { state.root, new_pane },
+                        children = { tab.root, new_pane },
                     }
                 end
             end
@@ -838,9 +1096,47 @@ function M.update(event)
                 -- Detach from session
                 prise.detach(prise.next_session_name())
                 handled = true
+            elseif k == "t" then
+                -- New tab
+                local pty = get_focused_pty()
+                state.pending_new_tab = true
+                prise.spawn({ cwd = pty and pty:cwd() })
+                handled = true
+            elseif k == "n" then
+                -- Next tab
+                if #state.tabs > 1 then
+                    local next_idx = state.active_tab % #state.tabs + 1
+                    set_active_tab_index(next_idx)
+                end
+                handled = true
+            elseif k == "p" then
+                -- Previous tab
+                if #state.tabs > 1 then
+                    local prev_idx = (state.active_tab - 2 + #state.tabs) % #state.tabs + 1
+                    set_active_tab_index(prev_idx)
+                end
+                handled = true
+            elseif k == "c" then
+                -- Close current tab
+                close_current_tab()
+                handled = true
+            elseif k >= "1" and k <= "9" then
+                -- Switch to tab N
+                local idx = tonumber(k)
+                if idx and idx <= #state.tabs then
+                    set_active_tab_index(idx)
+                end
+                handled = true
+            elseif k == "0" then
+                -- Switch to tab 10
+                if 10 <= #state.tabs then
+                    set_active_tab_index(10)
+                end
+                handled = true
             elseif k == "w" then
                 -- Close current pane
-                local path = state.focused_id and find_node_path(state.root, state.focused_id)
+                local root = get_active_root()
+                local path = state.focused_id and find_node_path(root, state.focused_id)
                 if path then
                     local pane = path[#path]
                     pane.pty:close()
@@ -909,8 +1205,9 @@ function M.update(event)
         end
 
         -- Pass key to focused PTY
-        if state.root and state.focused_id then
-            local path = find_node_path(state.root, state.focused_id)
+        local root = get_active_root()
+        if root and state.focused_id then
+            local path = find_node_path(root, state.focused_id)
             if path then
                 local pane = path[#path]
                 pane.pty:send_key(event.data)
@@ -918,8 +1215,9 @@ function M.update(event)
         end
     elseif event.type == "key_release" then
         -- Forward all key releases to focused PTY
-        if state.root and state.focused_id then
-            local path = find_node_path(state.root, state.focused_id)
+        local root = get_active_root()
+        if root and state.focused_id then
+            local path = find_node_path(root, state.focused_id)
             if path then
                 local pane = path[#path]
                 local data = event.data
@@ -934,12 +1232,15 @@ function M.update(event)
             state.palette.input:insert(text)
             state.palette.selected = 1
             prise.request_frame()
-        elseif state.root and state.focused_id then
-            -- Forward paste to focused PTY
-            local path = find_node_path(state.root, state.focused_id)
-            if path then
-                local pane = path[#path]
-                pane.pty:send_paste(event.data.text)
+        else
+            local root = get_active_root()
+            if root and state.focused_id then
+                -- Forward paste to focused PTY
+                local path = find_node_path(root, state.focused_id)
+                if path then
+                    local pane = path[#path]
+                    pane.pty:send_paste(event.data.text)
+                end
             end
         end
     elseif event.type == "pty_exited" then
@@ -961,8 +1262,9 @@ function M.update(event)
             end
         end
         -- Forward mouse events to the target PTY if there is one
-        if d.target and state.root then
-            local path = find_node_path(state.root, d.target)
+        local root = get_active_root()
+        if d.target and root then
+            local path = find_node_path(root, d.target)
             if path then
                 local pane = path[#path]
                 pane.pty:send_mouse({
@@ -1017,7 +1319,8 @@ function M.update(event)
             return false
         end
 
-        if update_split_ratio(state.root) then
+        local root = get_active_root()
+        if update_split_ratio(root) then
             prise.request_frame()
             prise.save() -- Auto-save on layout change
         end
@@ -1119,6 +1422,41 @@ local function build_palette()
     })
 end
 
+---Build the tab bar (only shown if more than 1 tab)
+---@return table?
+local function build_tab_bar()
+    if #state.tabs <= 1 then
+        return nil
+    end
+
+    local items = {}
+    for i, tab in ipairs(state.tabs) do
+        local is_active = (i == state.active_tab)
+        local label = tab.title or ("Tab " .. i)
+
+        local style = is_active and { bg = THEME.mode_normal, fg = THEME.fg_dark }
+            or { bg = THEME.bg2, fg = THEME.fg_bright }
+
+        table.insert(
+            items,
+            prise.Box({
+                border = "none",
+                style = style,
+                child = prise.Padding({
+                    left = 1,
+                    right = 1,
+                    child = prise.Text(label),
+                }),
+            })
+        )
+    end
+
+    return prise.Row({
+        children = items,
+        cross_axis_align = "stretch",
+    })
+end
+
 ---Build the powerline-style status bar
 ---@return table
 local function build_status_bar()
@@ -1128,8 +1466,9 @@ local function build_status_bar()
 
     -- Get pane title
     local title = "Terminal"
-    if state.focused_id then
-        local path = find_node_path(state.root, state.focused_id)
+    local root = get_active_root()
+    if state.focused_id and root then
+        local path = find_node_path(root, state.focused_id)
         if path then
             local pane = path[#path]
             local t = pane.pty:title()
@@ -1143,8 +1482,14 @@ local function build_status_bar()
     local pane_idx, pane_total = get_pane_position()
     local pane_info = string.format(" %d/%d ", pane_idx, pane_total)
 
+    -- Tab info (if multiple tabs)
+    local tab_info = ""
+    if #state.tabs > 1 then
+        tab_info = string.format(" Tab %d/%d ", state.active_tab, #state.tabs)
+    end
+
     -- Build the segments
-    return prise.Text({
+    local segments = {
         -- Left side: mode indicator
         { text = mode_text, style = { bg = mode_color, fg = THEME.fg_dark, bold = true } },
         { text = POWERLINE_SYMBOLS.right_solid, style = { fg = mode_color, bg = THEME.bg2 } },
@@ -1155,13 +1500,24 @@ local function build_status_bar()
 
         -- Pane info
         { text = pane_info, style = { bg = THEME.bg3, fg = THEME.fg_dim } },
-        { text = POWERLINE_SYMBOLS.right_solid, style = { fg = THEME.bg3, bg = THEME.bg1 } },
-    })
+    }
+
+    -- Add tab info if applicable
+    if #state.tabs > 1 then
+        table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = THEME.bg3, bg = THEME.bg4 } })
+        table.insert(segments, { text = tab_info, style = { bg = THEME.bg4, fg = THEME.fg_dim } })
+        table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = THEME.bg4, bg = THEME.bg1 } })
+    else
+        table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = THEME.bg3, bg = THEME.bg1 } })
+    end
+
+    return prise.Text(segments)
 end
 
 ---@return table
 function M.view()
-    if not state.root then
+    local root = get_active_root()
+    if not root then
         return prise.Column({
             cross_axis_align = "stretch",
             children = { prise.Text("Waiting for terminal...") },
@@ -1169,16 +1525,21 @@ function M.view()
     end
 
     local palette = build_palette()
+    local tab_bar = build_tab_bar()
     prise.log.debug("view: palette.visible=" .. tostring(state.palette.visible))
-    local content = render_node(state.root, state.palette.visible)
+    local content = render_node(root, state.palette.visible)
     local status_bar = build_status_bar()
+
+    local main_children = {}
+    if tab_bar then
+        table.insert(main_children, tab_bar)
+    end
+    table.insert(main_children, content)
+    table.insert(main_children, status_bar)
 
     local main_ui = prise.Column({
         cross_axis_align = "stretch",
-        children = {
-            content,
-            status_bar,
-        },
+        children = main_children,
     })
 
     if palette then
@@ -1195,8 +1556,21 @@ end
 
 ---@return table
 function M.get_state(cwd_lookup)
+    -- Serialize all tabs
+    local tabs_data = {}
+    for _, tab in ipairs(state.tabs) do
+        table.insert(tabs_data, {
+            id = tab.id,
+            title = tab.title,
+            root = serialize_node(tab.root, cwd_lookup),
+            last_focused_id = tab.last_focused_id,
+        })
+    end
+
     return {
-        root = serialize_node(state.root, cwd_lookup),
+        tabs = tabs_data,
+        active_tab = state.active_tab,
+        next_tab_id = state.next_tab_id,
         focused_id = state.focused_id,
         next_split_id = state.next_split_id,
     }
@@ -1208,14 +1582,61 @@ function M.set_state(saved, pty_lookup)
     if not saved then
         return
     end
-    state.root = deserialize_node(saved.root, pty_lookup)
-    state.focused_id = saved.focused_id
-    state.next_split_id = saved.next_split_id or 1
 
-    if state.root and not state.focused_id then
-        local first = get_first_leaf(state.root)
-        if first then
-            state.focused_id = first.id
+    -- Handle migration from old format (single root) to new format (tabs)
+    if saved.tabs == nil and saved.root ~= nil then
+        -- Old format: migrate to tabs
+        local restored_root = deserialize_node(saved.root, pty_lookup)
+        if restored_root then
+            local tab_id = 1
+            state.tabs = {
+                {
+                    id = tab_id,
+                    root = restored_root,
+                    last_focused_id = saved.focused_id,
+                },
+            }
+            state.active_tab = 1
+            state.next_tab_id = tab_id + 1
+            state.focused_id = saved.focused_id
+            state.next_split_id = saved.next_split_id or 1
+        end
+    else
+        -- New format: restore tabs
+        state.tabs = {}
+        for _, tab_data in ipairs(saved.tabs or {}) do
+            local restored_root = deserialize_node(tab_data.root, pty_lookup)
+            if restored_root then
+                table.insert(state.tabs, {
+                    id = tab_data.id,
+                    title = tab_data.title,
+                    root = restored_root,
+                    last_focused_id = tab_data.last_focused_id,
+                })
+            end
+        end
+        state.active_tab = saved.active_tab or 1
+        state.next_tab_id = saved.next_tab_id or (#state.tabs + 1)
+        state.focused_id = saved.focused_id
+        state.next_split_id = saved.next_split_id or 1
+
+        -- Ensure active_tab is valid
+        if state.active_tab > #state.tabs then
+            state.active_tab = #state.tabs
+        end
+        if state.active_tab < 1 and #state.tabs > 0 then
+            state.active_tab = 1
+        end
+    end
+
+    -- Ensure focus is valid
+    if #state.tabs > 0 and not state.focused_id then
+        local tab = state.tabs[state.active_tab]
+        if tab then
+            local first = get_first_leaf(tab.root)
+            if first then
+                state.focused_id = first.id
+            end
         end
     end
 
