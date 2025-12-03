@@ -1590,15 +1590,26 @@ pub const App = struct {
                     else
                         item.style orelse list.style;
 
+                    // Fill entire row with background first
                     for (0..win.width) |col| {
-                        var grapheme: []const u8 = " ";
-                        if (col < item.text.len) {
-                            grapheme = item.text[col .. col + 1];
-                        }
                         win.writeCell(@intCast(col), row, .{
-                            .char = .{ .grapheme = grapheme, .width = 1 },
+                            .char = .{ .grapheme = " ", .width = 1 },
                             .style = item_style,
                         });
+                    }
+
+                    // Render text using grapheme iterator
+                    var col: u16 = 0;
+                    var giter = vaxis.unicode.graphemeIterator(item.text);
+                    while (giter.next()) |grapheme| {
+                        if (col >= win.width) break;
+                        const bytes = grapheme.bytes(item.text);
+                        const gw: u8 = @intCast(vaxis.gwidth.gwidth(bytes, .unicode));
+                        win.writeCell(col, row, .{
+                            .char = .{ .grapheme = bytes, .width = gw },
+                            .style = item_style,
+                        });
+                        col += gw;
                     }
                 }
             },
