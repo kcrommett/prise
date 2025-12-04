@@ -16,8 +16,8 @@ const log = std.log.scoped(.ui);
 const logger = std.log.scoped(.lua);
 
 const prise_module = @embedFile("lua/prise.lua");
-const default_ui_module = @embedFile("lua/default.lua");
-const fallback_init = "return require('prise').default()";
+const tiling_ui_module = @embedFile("lua/tiling.lua");
+const fallback_init = "return require('prise').tiling()";
 
 const TimerContext = struct {
     ui: *UI,
@@ -98,17 +98,52 @@ pub const UI = struct {
 
         lua.openLibs();
 
-        // Register prise module loader
+        // Add prise lua paths to package.path for runtime loading
+        const home = std.posix.getenv("HOME") orelse return error.NoHomeDirectory;
+        _ = try lua.getGlobal("package");
+        _ = lua.getField(-1, "path");
+        const current_path = lua.toString(-1) catch "";
+        lua.pop(1);
+
+        const extra_paths = try std.fmt.allocPrint(
+            allocator,
+            "{s}/.local/share/prise/lua/?.lua;/usr/local/share/prise/lua/?.lua;/usr/share/prise/lua/?.lua;{s}",
+            .{ home, current_path },
+        );
+        defer allocator.free(extra_paths);
+        _ = lua.pushString(extra_paths);
+        lua.setField(-2, "path");
+        lua.pop(1);
+
+        // Register prise module loader (always use embedded for API stability)
         _ = try lua.getGlobal("package");
         _ = lua.getField(-1, "preload");
         lua.pushFunction(ziglua.wrap(loadPriseModule));
         lua.setField(-2, "prise");
-        lua.pushFunction(ziglua.wrap(loadDefaultUiModule));
-        lua.setField(-2, "prise_default_ui");
+
+        // Only register embedded tiling UI if not found on disk
+        // (preload takes precedence over path, so we check explicitly)
+        const tiling_on_disk = blk: {
+            const user_path = try std.fs.path.join(allocator, &.{ home, ".local", "share", "prise", "lua", "prise_tiling_ui.lua" });
+            defer allocator.free(user_path);
+            const paths = [_][]const u8{
+                user_path,
+                "/usr/local/share/prise/lua/prise_tiling_ui.lua",
+                "/usr/share/prise/lua/prise_tiling_ui.lua",
+            };
+            for (paths) |p| {
+                std.fs.accessAbsolute(p, .{}) catch continue;
+                break :blk true;
+            }
+            break :blk false;
+        };
+        if (!tiling_on_disk) {
+            lua.pushFunction(ziglua.wrap(loadTilingUiModule));
+            lua.setField(-2, "prise_tiling_ui");
+        }
         lua.pop(2);
 
         // Try to load ~/.config/prise/init.lua
-        const home = std.posix.getenv("HOME") orelse return error.NoHomeDirectory;
         const config_path = try std.fs.path.joinZ(allocator, &.{ home, ".config", "prise", "init.lua" });
         defer allocator.free(config_path);
 
@@ -261,8 +296,8 @@ pub const UI = struct {
         return self.allocator.dupe(u8, AMORY_NAMES[0]);
     }
 
-    fn loadDefaultUiModule(lua: *ziglua.Lua) i32 {
-        lua.doString(default_ui_module) catch {
+    fn loadTilingUiModule(lua: *ziglua.Lua) i32 {
+        lua.doString(tiling_ui_module) catch {
             lua.pushNil();
             return 1;
         };
@@ -773,27 +808,28 @@ pub const UI = struct {
             return error.NoGetStateFunction;
         }
 
-        // Create cwd_lookup closure if provided
-        if (cwd_lookup_fn != null) {
-            const LookupCtx = struct {
-                ctx: *anyopaque,
-                lookup_fn: CwdLookupFn,
-            };
-            const lookup_ctx = try self.allocator.create(LookupCtx);
-            lookup_ctx.* = .{ .ctx = cwd_lookup_ctx, .lookup_fn = cwd_lookup_fn.? };
+        const LookupCtx = struct {
+            ctx: *anyopaque,
+            lookup_fn: CwdLookupFn,
+        };
 
-            self.lua.pushLightUserdata(lookup_ctx);
+        // Create cwd_lookup closure if provided
+        var lookup_ctx: ?*LookupCtx = null;
+        if (cwd_lookup_fn != null) {
+            lookup_ctx = try self.allocator.create(LookupCtx);
+            lookup_ctx.?.* = .{ .ctx = cwd_lookup_ctx, .lookup_fn = cwd_lookup_fn.? };
+
+            self.lua.pushLightUserdata(lookup_ctx.?);
             self.lua.pushClosure(ziglua.wrap(cwdLookupWrapper), 1);
         } else {
             self.lua.pushNil();
         }
+        defer if (lookup_ctx) |ctx| self.allocator.destroy(ctx);
 
         self.lua.protectedCall(.{ .args = 1, .results = 1, .msg_handler = 0 }) catch |err| {
             const msg = self.lua.toString(-1) catch "Unknown Lua error";
             log.err("Lua get_state error: {s}", .{msg});
             self.lua.pop(1);
-            // Note: If pwd_lookup_fn was provided, the closure context leaks on error.
-            // This is acceptable as error paths are rare.
             return err;
         };
         defer self.lua.pop(1);
@@ -888,7 +924,10 @@ pub const UI = struct {
 };
 
 fn luaTableToJson(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) ![]u8 {
-    const value = try luaToJsonValue(lua, allocator, index);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const value = try luaToJsonValue(lua, arena.allocator(), index);
 
     var list: std.ArrayList(u8) = .empty;
     errdefer list.deinit(allocator);

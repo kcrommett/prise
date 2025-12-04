@@ -65,12 +65,12 @@
 
 local M = {}
 
----Load the default UI module
+---Load the tiling UI module
 ---@return PriseUI
-function M.default()
-    local ok, result = pcall(require, "prise_default_ui")
+function M.tiling()
+    local ok, result = pcall(require, "prise_tiling_ui")
     if not ok then
-        error("Failed to load default UI: " .. tostring(result))
+        error("Failed to load tiling UI: " .. tostring(result))
     end
     return result
 end

@@ -97,6 +97,125 @@ systemctl --user start prise    # start
 systemctl --user status prise   # check status
 ```
 
+## Configuration
+
+Prise is configured via Lua. Create `~/.config/prise/init.lua` to customize the UI.
+
+### Example Configuration
+
+```lua
+-- Use the built-in tiling UI with custom options
+local ui = require("prise").tiling()
+
+ui.setup({
+    theme = {
+        mode_normal = "#7aa2f7",  -- Tokyo Night blue
+        mode_command = "#f7768e", -- Tokyo Night red
+        bg1 = "#1a1b26",
+        bg2 = "#24283b",
+        bg3 = "#414868",
+        accent = "#7aa2f7",
+    },
+    keybinds = {
+        leader = { key = "a", ctrl = true },  -- Use Ctrl+a as leader (like tmux)
+    },
+    status_bar = {
+        enabled = true,
+    },
+    tab_bar = {
+        show_single_tab = false,
+    },
+})
+
+return ui
+```
+
+### Default Keybinds
+
+The default leader key is `Super+k` (Cmd+k on macOS). After pressing the leader:
+
+| Key | Action |
+|-----|--------|
+| `v` | Split vertical |
+| `s` | Split horizontal |
+| `h/j/k/l` | Focus left/down/up/right |
+| `w` | Close pane |
+| `z` | Toggle zoom |
+| `t` | New tab |
+| `c` | Close tab |
+| `n/p` | Next/previous tab |
+| `d` | Detach session |
+| `q` | Quit |
+
+Press `Super+p` to open the command palette.
+
+## Lua LSP Setup
+
+Prise installs type definitions to `<prefix>/share/prise/lua/`. To get autocomplete and type checking in your editor, add this path to your Lua language server configuration.
+
+### Neovim (with nvim-lspconfig)
+
+```lua
+require("lspconfig").lua_ls.setup({
+    settings = {
+        Lua = {
+            workspace = {
+                library = {
+                    vim.fn.expand("~/.local/share/prise/lua"),
+                },
+            },
+        },
+    },
+})
+```
+
+### Neovim (with LazyVim)
+
+Add to `lua/plugins/lua_ls.lua`:
+
+```lua
+return {
+    "neovim/nvim-lspconfig",
+    opts = {
+        servers = {
+            lua_ls = {
+                settings = {
+                    Lua = {
+                        workspace = {
+                            library = {
+                                vim.fn.expand("~/.local/share/prise/lua"),
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+```
+
+### VS Code
+
+Add to `.vscode/settings.json`:
+
+```json
+{
+    "Lua.workspace.library": [
+        "~/.local/share/prise/lua"
+    ]
+}
+```
+
+### .luarc.json (project-level)
+
+```json
+{
+    "workspace.library": [
+        "~/.local/share/prise/lua"
+    ]
+}
+```
+
 ## Requirements
 
 The following binaries are required for development:

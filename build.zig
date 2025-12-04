@@ -48,6 +48,9 @@ pub fn build(b: *std.Build) void {
     b.installFile("completions/prise.bash", "share/bash-completion/completions/prise");
     b.installFile("completions/prise.zsh", "share/zsh/site-functions/_prise");
 
+    b.installFile("src/lua/prise.lua", "share/prise/lua/prise.lua");
+    b.installFile("src/lua/tiling.lua", "share/prise/lua/prise_tiling_ui.lua");
+
     const os = @import("builtin").os.tag;
     if (os.isDarwin()) {
         const plist = b.addWriteFiles();

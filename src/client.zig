@@ -1877,6 +1877,10 @@ pub const App = struct {
         self.state.next_msgid += 1;
         try self.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = self.initial_cwd } });
 
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const arena_alloc = arena.allocator();
+
         var env_map = try std.process.getEnvMap(self.allocator);
         defer env_map.deinit();
 
@@ -1884,7 +1888,7 @@ pub const App = struct {
         defer env_array.deinit(self.allocator);
         var env_it = env_map.iterator();
         while (env_it.next()) |entry| {
-            const env_str = try std.fmt.allocPrint(self.allocator, "{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
+            const env_str = try std.fmt.allocPrint(arena_alloc, "{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
             try env_array.append(self.allocator, .{ .string = env_str });
         }
 
@@ -1901,8 +1905,8 @@ pub const App = struct {
         }
         const params_val = msgpack.Value{ .map = params_kv };
         const msg = try msgpack.encode(self.allocator, .{ 0, msgid, "spawn_pty", params_val });
+        defer self.allocator.free(msg);
         try self.sendDirect(msg);
-        self.allocator.free(msg);
     }
 
     fn startSessionAttach(self: *App, session_name: []const u8) !void {
