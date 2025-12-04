@@ -160,6 +160,11 @@ local state = {
         selected = 1,
         scroll_offset = 0,
     },
+    -- Rename session prompt
+    rename = {
+        visible = false,
+        input = nil, -- TextInput handle
+    },
     -- Tab bar hit regions: array of {start_x, end_x, tab_index}
     tab_regions = {},
     -- Currently hovered tab index (nil if none)
@@ -1023,6 +1028,12 @@ local commands = {
         end,
     },
     {
+        name = "Rename Session",
+        action = function()
+            open_rename()
+        end,
+    },
+    {
         name = "Quit",
         shortcut = key_prefix .. " q",
         action = function()
@@ -1198,6 +1209,30 @@ local function execute_selected()
     end
 end
 
+local function open_rename()
+    if not state.rename.input then
+        state.rename.input = prise.create_text_input()
+    end
+    local current_name = prise.get_session_name() or ""
+    state.rename.input:clear()
+    state.rename.input:insert(current_name)
+    state.rename.visible = true
+    prise.request_frame()
+end
+
+local function close_rename()
+    state.rename.visible = false
+    prise.request_frame()
+end
+
+local function execute_rename()
+    local new_name = state.rename.input:text()
+    if new_name and new_name ~= "" then
+        prise.rename_session(new_name)
+    end
+    close_rename()
+end
+
 -- --- Main Functions ---
 
 ---@param event { type: string, data: table }
@@ -1308,6 +1343,28 @@ function M.update(event)
             elseif #k == 1 and not event.data.ctrl and not event.data.alt and not event.data.super then
                 state.palette.input:insert(k)
                 state.palette.selected = 1
+                prise.request_frame()
+                return
+            end
+            return
+        end
+
+        -- Handle rename session prompt
+        if state.rename.visible then
+            local k = event.data.key
+
+            if k == "Escape" then
+                close_rename()
+                return
+            elseif k == "Enter" then
+                execute_rename()
+                return
+            elseif k == "Backspace" then
+                state.rename.input:delete_backward()
+                prise.request_frame()
+                return
+            elseif #k == 1 and not event.data.ctrl and not event.data.alt and not event.data.super then
+                state.rename.input:insert(k)
                 prise.request_frame()
                 return
             end
@@ -1763,6 +1820,43 @@ local function build_palette()
     })
 end
 
+---Build the rename session overlay
+---@return table?
+local function build_rename()
+    if not state.rename.visible or not state.rename.input then
+        return nil
+    end
+
+    local palette_style = { bg = THEME.bg1, fg = THEME.fg_bright }
+    local input_style = { bg = THEME.bg1, fg = THEME.fg_bright }
+
+    return prise.Positioned({
+        anchor = "top_center",
+        y = 5,
+        child = prise.Box({
+            border = "none",
+            max_width = 60,
+            style = palette_style,
+            child = prise.Padding({
+                top = 1,
+                bottom = 1,
+                left = 2,
+                right = 2,
+                child = prise.Column({
+                    cross_axis_align = "stretch",
+                    children = {
+                        prise.Text({ text = "Rename Session", style = { fg = THEME.fg_dim } }),
+                        prise.TextInput({
+                            input = state.rename.input,
+                            style = input_style,
+                        }),
+                    },
+                }),
+            }),
+        }),
+    })
+end
+
 ---Build the tab bar (only shown if more than 1 tab)
 ---@return table?
 local function build_tab_bar()
@@ -1882,10 +1976,12 @@ function M.view()
     end
 
     local palette = build_palette()
+    local rename = build_rename()
     local tab_bar = build_tab_bar()
     prise.log.debug("view: palette.visible=" .. tostring(state.palette.visible))
 
     -- When zoomed, render only the zoomed pane
+    local overlay_visible = state.palette.visible or state.rename.visible
     local content
     if state.zoomed_pane_id then
         local path = find_node_path(root, state.zoomed_pane_id)
@@ -1893,14 +1989,14 @@ function M.view()
             local pane = path[#path]
             content = prise.Terminal({
                 pty = pane.pty,
-                focus = not state.palette.visible,
+                focus = not overlay_visible,
             })
         else
             state.zoomed_pane_id = nil
-            content = render_node(root, state.palette.visible)
+            content = render_node(root, overlay_visible)
         end
     else
-        content = render_node(root, state.palette.visible)
+        content = render_node(root, overlay_visible)
     end
 
     local status_bar = config.status_bar.enabled and build_status_bar() or nil
@@ -1919,11 +2015,12 @@ function M.view()
         children = main_children,
     })
 
-    if palette then
+    local overlay = palette or rename
+    if overlay then
         return prise.Stack({
             children = {
                 main_ui,
-                palette,
+                overlay,
             },
         })
     end
