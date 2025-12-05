@@ -13,6 +13,7 @@ Prise is a terminal multiplexer targeted at modern terminals.
 ```bash
 brew tap rockorager/prise
 brew install prise
+brew services start prise
 ```
 
 ### From Source
@@ -35,7 +36,13 @@ This will:
 
 ### Manual Service Management
 
-**macOS**:
+**Homebrew (macOS)**:
+```bash
+brew services start prise
+brew services stop prise
+```
+
+**macOS (from source)**:
 ```bash
 launchctl unload ~/Library/LaunchAgents/sh.prise.server.plist  # stop
 launchctl load ~/Library/LaunchAgents/sh.prise.server.plist    # start
