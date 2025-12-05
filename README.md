@@ -2,6 +2,52 @@
 
 Prise is a terminal multiplexer targeted at modern terminals.
 
+<p align="center">
+  <img src="assets/prise.png" alt="Prise terminal multiplexer" />
+</p>
+
+## Installation
+
+### Homebrew (macOS)
+
+```bash
+brew tap rockorager/prise
+brew install prise
+```
+
+### From Source
+
+To install the binary and service files:
+
+```bash
+zig build install --prefix ~/.local
+```
+
+To enable and start the prise server as a background service:
+
+```bash
+zig build enable-service --prefix ~/.local
+```
+
+This will:
+- **macOS**: Symlink the launchd plist to `~/Library/LaunchAgents/` and load it
+- **Linux**: Symlink the systemd unit to `~/.config/systemd/user/` and enable it
+
+### Manual Service Management
+
+**macOS**:
+```bash
+launchctl unload ~/Library/LaunchAgents/sh.prise.server.plist  # stop
+launchctl load ~/Library/LaunchAgents/sh.prise.server.plist    # start
+```
+
+**Linux**:
+```bash
+systemctl --user stop prise     # stop
+systemctl --user start prise    # start
+systemctl --user status prise   # check status
+```
+
 ## Goals
 
 1.  **Modern Terminal Features**: This is a core tenet. Terminals that do not
@@ -62,39 +108,6 @@ To format code:
 
 ```bash
 zig build fmt
-```
-
-## Installation
-
-To install the binary and service files:
-
-```bash
-zig build install --prefix ~/.local
-```
-
-To enable and start the prise server as a background service:
-
-```bash
-zig build enable-service --prefix ~/.local
-```
-
-This will:
-- **macOS**: Symlink the launchd plist to `~/Library/LaunchAgents/` and load it
-- **Linux**: Symlink the systemd unit to `~/.config/systemd/user/` and enable it
-
-### Manual Service Management
-
-**macOS**:
-```bash
-launchctl unload ~/Library/LaunchAgents/sh.prise.server.plist  # stop
-launchctl load ~/Library/LaunchAgents/sh.prise.server.plist    # start
-```
-
-**Linux**:
-```bash
-systemctl --user stop prise     # stop
-systemctl --user start prise    # start
-systemctl --user status prise   # check status
 ```
 
 ## Configuration
