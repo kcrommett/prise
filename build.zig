@@ -83,7 +83,28 @@ pub fn build(b: *std.Build) void {
             .install_subdir = "",
         }).step);
     } else if (os == .linux) {
-        b.installFile("dist/prise.service", "lib/systemd/user/prise.service");
+        const service = b.addWriteFiles();
+        const service_content = std.fmt.allocPrint(b.allocator,
+            \\[Unit]
+            \\Description=Prise terminal multiplexer server
+            \\Documentation=https://prise.sh
+            \\
+            \\[Service]
+            \\Type=simple
+            \\ExecStart={s}/bin/prise serve
+            \\Restart=on-failure
+            \\RestartSec=5
+            \\
+            \\[Install]
+            \\WantedBy=default.target
+            \\
+        , .{b.install_prefix}) catch @panic("OOM");
+        _ = service.add("prise.service", service_content);
+        b.getInstallStep().dependOn(&b.addInstallDirectory(.{
+            .source_dir = service.getDirectory(),
+            .install_dir = .{ .custom = "lib/systemd/user" },
+            .install_subdir = "",
+        }).step);
     }
 
     const run_cmd = b.addRunArtifact(exe);
