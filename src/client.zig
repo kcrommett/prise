@@ -2300,6 +2300,15 @@ pub const App = struct {
                                                         try self.requestCopySelection(id);
                                                     }
                                                 }.appCopySelection,
+                                                .cell_size_fn = struct {
+                                                    fn appGetCellSize(ctx: *anyopaque) lua_event.CellSize {
+                                                        const self: *App = @ptrCast(@alignCast(ctx));
+                                                        return .{
+                                                            .width = self.cell_width_px,
+                                                            .height = self.cell_height_px,
+                                                        };
+                                                    }
+                                                }.appGetCellSize,
                                             },
                                         }) catch |err| {
                                             log.err("Failed to update UI with pty_attach: {}", .{err});
@@ -3016,6 +3025,15 @@ pub const App = struct {
                     try app.requestCopySelection(pty_id);
                 }
             }.copySelection,
+            .cell_size_fn = struct {
+                fn getCellSize(app_ctx: *anyopaque) lua_event.CellSize {
+                    const app: *App = @ptrCast(@alignCast(app_ctx));
+                    return .{
+                        .width = app.cell_width_px,
+                        .height = app.cell_height_px,
+                    };
+                }
+            }.getCellSize,
         };
     }
 };

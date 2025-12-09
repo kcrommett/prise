@@ -467,6 +467,25 @@ local function get_focused_pty()
     return nil
 end
 
+local function get_auto_split_direction()
+    local pty = get_focused_pty()
+    if pty then
+        local size = pty:size()
+        local wider
+        if size.width_px > 0 and size.height_px > 0 then
+            wider = size.width_px > size.height_px
+        else
+            wider = size.cols > size.rows
+        end
+        if wider then
+            return "row"
+        else
+            return "col"
+        end
+    end
+    return "row"
+end
+
 local function update_pty_focus(old_id, new_id)
     if old_id == new_id then
         return
@@ -1040,15 +1059,8 @@ local commands = {
         shortcut = key_prefix .. " Enter",
         action = function()
             local pty = get_focused_pty()
-            if pty then
-                local size = pty:size()
-                if size.cols > (size.rows * 2.2) then
-                    state.pending_split = { direction = "row" }
-                else
-                    state.pending_split = { direction = "col" }
-                end
-                prise.spawn({ cwd = pty:cwd() })
-            end
+            state.pending_split = { direction = get_auto_split_direction() }
+            prise.spawn({ cwd = pty and pty:cwd() })
         end,
     },
     {
@@ -1642,18 +1654,9 @@ function M.update(event)
                 handled = true
             elseif k == "Enter" or k == "\r" or k == "\n" then
                 local pty = get_focused_pty()
-                if pty then
-                    local size = pty:size()
-                    -- Account for cell aspect ratio (roughly 1:2)
-                    -- Split along the longest visual axis
-                    if size.cols > (size.rows * 2.2) then
-                        state.pending_split = { direction = "row" }
-                    else
-                        state.pending_split = { direction = "col" }
-                    end
-                    prise.spawn({ cwd = pty:cwd() })
-                    handled = true
-                end
+                state.pending_split = { direction = get_auto_split_direction() }
+                prise.spawn({ cwd = pty and pty:cwd() })
+                handled = true
             end
 
             if handled then
