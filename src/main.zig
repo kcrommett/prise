@@ -375,7 +375,7 @@ fn runClient(allocator: std.mem.Allocator, socket_path: []const u8, args: ParseR
         var stderr = std.fs.File.stderr().writer(&buf);
         defer stderr.interface.flush() catch {};
         switch (err) {
-            error.InitLuaMustReturnTable => stderr.interface.print("error: init.lua must return a UI table\n  example: return require('prise').default()\n", .{}) catch {},
+            error.InitLuaMustReturnTable => stderr.interface.print("error: init.lua must return a UI table\n  example: return require('prise').tiling()\n", .{}) catch {},
             error.InitLuaFailed => stderr.interface.print("error: failed to load init.lua (check logs for details)\n", .{}) catch {},
             error.DefaultUIFailed => stderr.interface.print("error: failed to load default UI\n", .{}) catch {},
             else => {},
