@@ -2212,7 +2212,7 @@ const Server = struct {
         return msgpack.Value.nil;
     }
 
-    fn handleResizePty(self: *Server, params: msgpack.Value) !msgpack.Value {
+    fn handleResizePty(self: *Server, client: *Client, params: msgpack.Value) !msgpack.Value {
         const args = parseResizePtyParams(params) catch {
             return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
         };
@@ -2279,6 +2279,18 @@ const Server = struct {
         }
 
         pty_instance.terminal_mutex.unlock();
+
+        // Send full redraw to client so the resized terminal content is visible
+        // immediately, without waiting for the child process to produce output
+        const msg = buildRedrawMessageFromPty(self.allocator, pty_instance, .full) catch |err| {
+            log.warn("resize_pty request: failed to build redraw message: {}", .{err});
+            return msgpack.Value.nil;
+        };
+        defer self.allocator.free(msg);
+
+        self.sendRedraw(self.loop, pty_instance, msg, client) catch |err| {
+            log.warn("resize_pty request: failed to send redraw: {}", .{err});
+        };
 
         log.info("Resized PTY {} to {}x{} ({}x{}px)", .{ args.id, args.cols, args.rows, args.x_pixel, args.y_pixel });
         return msgpack.Value.nil;
@@ -2463,7 +2475,7 @@ const Server = struct {
         } else if (std.mem.eql(u8, method, "write_pty")) {
             return self.handleWritePty(params);
         } else if (std.mem.eql(u8, method, "resize_pty")) {
-            return self.handleResizePty(params);
+            return self.handleResizePty(client, params);
         } else if (std.mem.eql(u8, method, "detach_pty")) {
             return self.handleDetachPty(client, params);
         } else if (std.mem.eql(u8, method, "detach_ptys")) {
