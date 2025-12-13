@@ -30,12 +30,12 @@ zig build -Doptimize=ReleaseSafe -Dlua-check=false install --prefix ~/.local
 To enable and start the prise server as a background service:
 
 ```bash
-zig build enable-service --prefix ~/.local
+zig build -Doptimize=ReleaseSafe --prefix ~/.local enable-service
 ```
 
 This will:
 - **macOS**: Symlink the launchd plist to `~/Library/LaunchAgents/` and load it
-- **Linux**: Symlink the systemd unit to `~/.config/systemd/user/` and enable it
+- **Linux**: Reload the systemd daemon and enable/start the service
 
 ### Manual Service Management
 
