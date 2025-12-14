@@ -7,6 +7,7 @@ const ziglua = @import("zlua");
 
 const msgpack = @import("msgpack.zig");
 const Surface = @import("Surface.zig");
+const TextInput = @import("TextInput.zig");
 const vaxis_helper = @import("vaxis_helper.zig");
 
 const log = std.log.scoped(.lua_event);
@@ -656,11 +657,12 @@ pub fn luaToMsgpack(lua: *ziglua.Lua, index: i32, allocator: std.mem.Allocator) 
     }
 }
 
-pub fn getPtyId(lua: *ziglua.Lua, index: i32) !u32 {
-    if (lua.typeOf(index) == .number) {
-        return @intCast(try lua.toInteger(index));
-    }
+pub const PtyInfo = struct {
+    id: u32,
+    surface: *Surface,
+};
 
+pub fn getPtyInfo(lua: *ziglua.Lua, index: i32) !PtyInfo {
     if (lua.isUserdata(index)) {
         lua.getMetatable(index) catch return error.InvalidPty;
 
@@ -670,22 +672,33 @@ pub fn getPtyId(lua: *ziglua.Lua, index: i32) !u32 {
 
         if (equal) {
             const pty = try lua.toUserdata(PtyHandle, index);
-            return pty.id;
+            return .{ .id = pty.id, .surface = pty.surface };
         }
     }
 
     return error.InvalidPty;
 }
 
-const TextInputHandle = struct {
-    id: u32,
-};
-
-pub fn getTextInputId(lua: *ziglua.Lua, index: i32) !u32 {
+pub fn getPtyId(lua: *ziglua.Lua, index: i32) !u32 {
     if (lua.typeOf(index) == .number) {
         return @intCast(try lua.toInteger(index));
     }
 
+    const info = try getPtyInfo(lua, index);
+    return info.id;
+}
+
+const TextInputHandle = struct {
+    id: u32,
+    input: *TextInput,
+};
+
+pub const TextInputInfo = struct {
+    id: u32,
+    input: *TextInput,
+};
+
+pub fn getTextInputInfo(lua: *ziglua.Lua, index: i32) !TextInputInfo {
     if (lua.isUserdata(index)) {
         lua.getMetatable(index) catch return error.InvalidTextInput;
 
@@ -695,11 +708,20 @@ pub fn getTextInputId(lua: *ziglua.Lua, index: i32) !u32 {
 
         if (equal) {
             const handle = try lua.toUserdata(TextInputHandle, index);
-            return handle.id;
+            return .{ .id = handle.id, .input = handle.input };
         }
     }
 
     return error.InvalidTextInput;
+}
+
+pub fn getTextInputId(lua: *ziglua.Lua, index: i32) !u32 {
+    if (lua.typeOf(index) == .number) {
+        return @intCast(try lua.toInteger(index));
+    }
+
+    const info = try getTextInputInfo(lua, index);
+    return info.id;
 }
 
 pub fn pushPtyUserdata(

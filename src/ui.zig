@@ -1067,6 +1067,7 @@ fn pushJsonValue(lua: *ziglua.Lua, value: std.json.Value) !void {
 
 const TextInputHandle = struct {
     id: u32,
+    input: *TextInput,
 };
 
 fn registerTextInputMetatable(lua: *ziglua.Lua) void {
@@ -1137,10 +1138,7 @@ fn textInputIndex(lua: *ziglua.Lua) i32 {
 
 fn getTextInput(lua: *ziglua.Lua) ?*TextInput {
     const handle = lua.checkUserdata(TextInputHandle, 1, "PriseTextInput");
-    _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
-    const ui = lua.toUserdata(UI, -1) catch return null;
-    lua.pop(1);
-    return ui.text_inputs.get(handle.id);
+    return handle.input;
 }
 
 fn textInputId(lua: *ziglua.Lua) i32 {
@@ -1257,7 +1255,7 @@ fn createTextInput(lua: *ziglua.Lua) i32 {
     };
 
     const handle = lua.newUserdata(TextInputHandle, @sizeOf(TextInputHandle));
-    handle.* = .{ .id = id };
+    handle.* = .{ .id = id, .input = input };
 
     _ = lua.getMetatableRegistry("PriseTextInput");
     lua.setMetatable(-2);

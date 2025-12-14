@@ -627,7 +627,7 @@ pub const App = struct {
     parser: vaxis.Parser = undefined,
     pipe_buf: std.ArrayList(u8),
     pipe_recv_buffer: [4096]u8 = undefined,
-    colors: TerminalColors = .{},
+    colors: Surface.TerminalColors = .{},
 
     pending_attach_ids: ?[]u32 = null,
     pending_attach_count: usize = 0,
@@ -647,43 +647,6 @@ pub const App = struct {
     pub const PendingColorQuery = struct {
         pty_id: u32,
         target: ServerAction.ColorQueryTarget.Target,
-    };
-
-    pub const TerminalColors = struct {
-        fg: ?vaxis.Cell.Color = null,
-        bg: ?vaxis.Cell.Color = null,
-        cursor: ?vaxis.Cell.Color = null,
-        palette: [256]?vaxis.Cell.Color = .{null} ** 256,
-
-        pub fn isDark(rgb: [3]u8) bool {
-            const r: u32 = rgb[0];
-            const g: u32 = rgb[1];
-            const b: u32 = rgb[2];
-            // Perceived luminance (Rec. 601)
-            // Y = 0.299R + 0.587G + 0.114B
-            // Using integer arithmetic with 1000 scale
-            const y = 299 * r + 587 * g + 114 * b;
-            return y < 128000;
-        }
-
-        pub fn reduceContrast(rgb: [3]u8, factor: f32) [3]u8 {
-            std.debug.assert(factor >= 0.0 and factor <= 1.0);
-            if (isDark(rgb)) {
-                // Dark background -> Lighten (mix with white)
-                return .{
-                    @intFromFloat(@as(f32, @floatFromInt(rgb[0])) * (1.0 - factor) + 255.0 * factor),
-                    @intFromFloat(@as(f32, @floatFromInt(rgb[1])) * (1.0 - factor) + 255.0 * factor),
-                    @intFromFloat(@as(f32, @floatFromInt(rgb[2])) * (1.0 - factor) + 255.0 * factor),
-                };
-            } else {
-                // Light background -> Darken (mix with black)
-                return .{
-                    @intFromFloat(@as(f32, @floatFromInt(rgb[0])) * (1.0 - factor)),
-                    @intFromFloat(@as(f32, @floatFromInt(rgb[1])) * (1.0 - factor)),
-                    @intFromFloat(@as(f32, @floatFromInt(rgb[2])) * (1.0 - factor)),
-                };
-            }
-        }
     };
 
     pub fn init(allocator: std.mem.Allocator) !App {
@@ -1335,7 +1298,7 @@ pub const App = struct {
                 log.err("Failed to allocate surface: {}", .{err});
                 return;
             };
-            surface.* = Surface.init(self.allocator, pty_id, rows, cols) catch |err| {
+            surface.* = Surface.init(self.allocator, pty_id, rows, cols, self.colors) catch |err| {
                 log.err("Failed to create surface: {}", .{err});
                 self.allocator.destroy(surface);
                 return;
@@ -1515,218 +1478,7 @@ pub const App = struct {
     }
 
     fn renderWidget(self: *App, w: widget.Widget, win: vaxis.Window) !void {
-        switch (w.kind) {
-            .surface => |surf| {
-                if (self.surfaces.get(surf.pty_id)) |surface| {
-                    // Check if we need to resize the PTY
-                    log.debug("renderWidget surface: pty={} widget={}x{} surface={}x{}", .{
-                        surf.pty_id,
-                        w.width,
-                        w.height,
-                        surface.cols,
-                        surface.rows,
-                    });
-                    if (w.width != surface.cols or w.height != surface.rows) {
-                        log.info("renderWidget: size mismatch for pty={}, sending resize", .{surf.pty_id});
-                        self.sendResize(surf.pty_id, w.height, w.width) catch |err| {
-                            log.err("Failed to send resize: {}", .{err});
-                        };
-                    }
-                    // Calculate dim factor based on focus
-                    const dim_factor: f32 = if (w.focus) 0.0 else 0.05; // Dim inactive windows by 5%
-                    surface.render(win, w.focus, &self.colors, dim_factor);
-                }
-            },
-            .text => |text| {
-                // Use a temporary arena for rendering this frame
-                var arena = std.heap.ArenaAllocator.init(self.allocator);
-                defer arena.deinit();
-                const alloc = arena.allocator();
-
-                var iter = widget.Text.Iterator{
-                    .text = text,
-                    .max_width = w.width,
-                    .allocator = alloc,
-                };
-
-                var row: usize = 0;
-                while (iter.next() catch null) |line| {
-                    var col: usize = 0;
-
-                    // Handle alignment
-                    const free_space = if (w.width > line.width) w.width - line.width else 0;
-                    const start_col: u16 = switch (text.@"align") {
-                        widget.Text.Align.left => 0,
-                        widget.Text.Align.center => free_space / 2,
-                        widget.Text.Align.right => free_space,
-                    };
-
-                    col = start_col;
-
-                    for (line.segments) |seg| {
-                        _ = win.printSegment(seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
-                        col += vaxis.gwidth.gwidth(seg.text, .unicode);
-                    }
-
-                    // Fill remaining space with background from last segment
-                    if (line.segments.len > 0 and col < w.width) {
-                        const last_style = line.segments[line.segments.len - 1].style;
-                        const spacer = vaxis.Segment{
-                            .text = " ",
-                            .style = last_style,
-                        };
-                        while (col < w.width) {
-                            _ = win.printSegment(spacer, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
-                            col += 1;
-                        }
-                    }
-
-                    row += 1;
-                }
-            },
-            .text_input => |ti| {
-                if (self.ui.text_inputs.get(ti.input_id)) |input| {
-                    input.updateScrollOffset(@intCast(win.width));
-                    input.render(win, ti.style);
-                }
-            },
-            .list => |list| {
-                const visible_rows = w.height;
-                const start = list.scroll_offset;
-                const end = @min(start + visible_rows, list.items.len);
-
-                log.debug("render list: items={} height={} start={} end={}", .{ list.items.len, w.height, start, end });
-
-                for (start..end) |i| {
-                    const row: u16 = @intCast(i - start);
-                    const item = list.items[i];
-                    const is_selected = list.selected != null and list.selected.? == i;
-
-                    const item_style = if (is_selected)
-                        list.selected_style
-                    else
-                        item.style orelse list.style;
-
-                    // Fill entire row with background first
-                    for (0..win.width) |col| {
-                        win.writeCell(@intCast(col), row, .{
-                            .char = .{ .grapheme = " ", .width = 1 },
-                            .style = item_style,
-                        });
-                    }
-
-                    // Render text using grapheme iterator
-                    var col: u16 = 0;
-                    var giter = vaxis.unicode.graphemeIterator(item.text);
-                    while (giter.next()) |grapheme| {
-                        if (col >= win.width) break;
-                        const bytes = grapheme.bytes(item.text);
-                        const gw: u8 = @intCast(vaxis.gwidth.gwidth(bytes, .unicode));
-                        win.writeCell(col, row, .{
-                            .char = .{ .grapheme = bytes, .width = gw },
-                            .style = item_style,
-                        });
-                        col += gw;
-                    }
-                }
-            },
-            .box => |b| {
-                const chars = b.borderChars();
-                const style = b.style;
-
-                log.debug("render box: w={} h={}", .{ win.width, win.height });
-
-                // Fill the entire box with background color
-                for (0..win.height) |row| {
-                    for (0..win.width) |col| {
-                        win.writeCell(@intCast(col), @intCast(row), .{
-                            .char = .{ .grapheme = " ", .width = 1 },
-                            .style = style,
-                        });
-                    }
-                }
-
-                if (b.border != .none and win.width >= 2 and win.height >= 2) {
-                    win.writeCell(0, 0, .{ .char = .{ .grapheme = chars.tl, .width = 1 }, .style = style });
-                    win.writeCell(win.width - 1, 0, .{ .char = .{ .grapheme = chars.tr, .width = 1 }, .style = style });
-                    win.writeCell(0, win.height - 1, .{ .char = .{ .grapheme = chars.bl, .width = 1 }, .style = style });
-                    win.writeCell(win.width - 1, win.height - 1, .{ .char = .{ .grapheme = chars.br, .width = 1 }, .style = style });
-
-                    if (win.width > 2) {
-                        for (1..win.width - 1) |col| {
-                            win.writeCell(@intCast(col), 0, .{ .char = .{ .grapheme = chars.h, .width = 1 }, .style = style });
-                            win.writeCell(@intCast(col), win.height - 1, .{ .char = .{ .grapheme = chars.h, .width = 1 }, .style = style });
-                        }
-                    }
-
-                    if (win.height > 2) {
-                        for (1..win.height - 1) |row| {
-                            win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = chars.v, .width = 1 }, .style = style });
-                            win.writeCell(win.width - 1, @intCast(row), .{ .char = .{ .grapheme = chars.v, .width = 1 }, .style = style });
-                        }
-                    }
-                }
-
-                const child_win = win.child(.{
-                    .x_off = b.child.x,
-                    .y_off = b.child.y,
-                    .width = b.child.width,
-                    .height = b.child.height,
-                });
-                try self.renderWidget(b.child.*, child_win);
-            },
-            .padding => |p| {
-                const child_win = win.child(.{
-                    .x_off = p.child.x,
-                    .y_off = p.child.y,
-                    .width = p.child.width,
-                    .height = p.child.height,
-                });
-                try self.renderWidget(p.child.*, child_win);
-            },
-            .column => |col| {
-                for (col.children) |child| {
-                    const child_win = win.child(.{
-                        .x_off = child.x,
-                        .y_off = child.y,
-                        .width = child.width,
-                        .height = child.height,
-                    });
-                    try self.renderWidget(child, child_win);
-                }
-            },
-            .row => |row| {
-                for (row.children) |child| {
-                    const child_win = win.child(.{
-                        .x_off = child.x,
-                        .y_off = child.y,
-                        .width = child.width,
-                        .height = child.height,
-                    });
-                    try self.renderWidget(child, child_win);
-                }
-            },
-            .stack => |stack| {
-                for (stack.children) |child| {
-                    const child_win = win.child(.{
-                        .x_off = child.x,
-                        .y_off = child.y,
-                        .width = child.width,
-                        .height = child.height,
-                    });
-                    try self.renderWidget(child, child_win);
-                }
-            },
-            .positioned => |pos| {
-                const child_win = win.child(.{
-                    .x_off = pos.child.x,
-                    .y_off = pos.child.y,
-                    .width = pos.child.width,
-                    .height = pos.child.height,
-                });
-                try self.renderWidget(pos.child.*, child_win);
-            },
-        }
+        try w.renderTo(win, self.allocator);
     }
 
     pub fn scheduleRender(self: *App) !void {
@@ -2130,7 +1882,7 @@ pub const App = struct {
                                         log.err("Failed to allocate surface: {}", .{err});
                                         return error.SurfaceInitFailed;
                                     };
-                                    surface.* = Surface.init(app.allocator, pty_id, ws.rows, ws.cols) catch |err| {
+                                    surface.* = Surface.init(app.allocator, pty_id, ws.rows, ws.cols, app.colors) catch |err| {
                                         log.err("Failed to create surface: {}", .{err});
                                         app.allocator.destroy(surface);
                                         return error.SurfaceInitFailed;

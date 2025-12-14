@@ -751,6 +751,7 @@ test {
     _ = @import("Surface.zig");
     _ = @import("widget.zig");
     _ = @import("TextInput.zig");
+    _ = @import("tui_test.zig");
     _ = @import("key_encode.zig");
     _ = @import("mouse_encode.zig");
     _ = @import("vaxis_helper.zig");
