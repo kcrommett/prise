@@ -3122,3 +3122,239 @@ test "render Text - single span with empty string renders without crash" {
     ;
     try tui_test.expectAsciiEqual(expected, ascii);
 }
+
+// ============================================================================
+// Unicode/Wide Character Tests
+// ============================================================================
+
+test "layout Text - CJK double-width characters" {
+    // CJK characters are double-width (each takes 2 columns)
+    // "你好" = 2 characters × 2 width = 4 columns
+    var spans = [_]Text.Span{.{ .text = "你好", .style = .{} }};
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans } },
+    };
+
+    const size = w.layout(boundsConstraints(20, 10));
+
+    try std.testing.expectEqual(@as(u16, 4), size.width);
+    try std.testing.expectEqual(@as(u16, 1), size.height);
+}
+
+test "layout Text - mixed ASCII and CJK" {
+    // "Hi你好" = 2 ASCII (2 cols) + 2 CJK (4 cols) = 6 columns
+    var spans = [_]Text.Span{.{ .text = "Hi你好", .style = .{} }};
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans } },
+    };
+
+    const size = w.layout(boundsConstraints(20, 10));
+
+    try std.testing.expectEqual(@as(u16, 6), size.width);
+    try std.testing.expectEqual(@as(u16, 1), size.height);
+}
+
+test "layout Text - CJK with word wrap" {
+    // "你好世界" = 4 CJK chars × 2 width = 8 columns
+    // With max_width=6, should wrap: "你好世" (6 cols) on line 1, "界" (2 cols) on line 2
+    // Note: char wrap breaks at character boundaries
+    var spans = [_]Text.Span{.{ .text = "你好世界", .style = .{} }};
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans, .wrap = .char } },
+    };
+
+    const size = w.layout(boundsConstraints(6, 10));
+
+    try std.testing.expectEqual(@as(u16, 2), size.height);
+}
+
+test "render Text - CJK characters" {
+    const allocator = std.testing.allocator;
+
+    var spans = [_]Text.Span{.{ .text = "你好", .style = .{} }};
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans } },
+    };
+
+    _ = w.layout(boundsConstraints(10, 1));
+
+    var screen = try tui_test.createScreen(allocator, 10, 1);
+    defer screen.deinit(allocator);
+    const win = tui_test.windowFromScreen(&screen);
+
+    try w.renderTo(win, allocator);
+
+    const ascii = try tui_test.screenToAscii(allocator, &screen, 10, 1);
+    defer allocator.free(ascii);
+
+    try tui_test.expectAsciiEqual("你好      ", ascii);
+}
+
+test "layout Text - emoji single codepoint" {
+    // Simple emoji like ⭐ is typically double-width
+    var spans = [_]Text.Span{.{ .text = "⭐", .style = .{} }};
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans } },
+    };
+
+    const size = w.layout(boundsConstraints(20, 10));
+
+    // Star emoji is typically width 2
+    try std.testing.expectEqual(@as(u16, 2), size.width);
+    try std.testing.expectEqual(@as(u16, 1), size.height);
+}
+
+test "layout Text - emoji mixed with text" {
+    // "Hi⭐" = 2 ASCII + 2 emoji width = 4 columns
+    var spans = [_]Text.Span{.{ .text = "Hi⭐", .style = .{} }};
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans } },
+    };
+
+    const size = w.layout(boundsConstraints(20, 10));
+
+    try std.testing.expectEqual(@as(u16, 4), size.width);
+    try std.testing.expectEqual(@as(u16, 1), size.height);
+}
+
+test "render Text - emoji" {
+    const allocator = std.testing.allocator;
+
+    var spans = [_]Text.Span{.{ .text = "A⭐B", .style = .{} }};
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans } },
+    };
+
+    _ = w.layout(boundsConstraints(10, 1));
+
+    var screen = try tui_test.createScreen(allocator, 10, 1);
+    defer screen.deinit(allocator);
+    const win = tui_test.windowFromScreen(&screen);
+
+    try w.renderTo(win, allocator);
+
+    const ascii = try tui_test.screenToAscii(allocator, &screen, 10, 1);
+    defer allocator.free(ascii);
+
+    try tui_test.expectAsciiEqual("A⭐B      ", ascii);
+}
+
+test "layout Text - box drawing characters" {
+    // Box drawing chars like ╭─╮ are single-width
+    var spans = [_]Text.Span{.{ .text = "╭──╮", .style = .{} }};
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans } },
+    };
+
+    const size = w.layout(boundsConstraints(20, 10));
+
+    try std.testing.expectEqual(@as(u16, 4), size.width);
+    try std.testing.expectEqual(@as(u16, 1), size.height);
+}
+
+test "render Text - box drawing characters" {
+    const allocator = std.testing.allocator;
+
+    var spans = [_]Text.Span{.{ .text = "╭─╮", .style = .{} }};
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans } },
+    };
+
+    _ = w.layout(boundsConstraints(5, 1));
+
+    var screen = try tui_test.createScreen(allocator, 5, 1);
+    defer screen.deinit(allocator);
+    const win = tui_test.windowFromScreen(&screen);
+
+    try w.renderTo(win, allocator);
+
+    const ascii = try tui_test.screenToAscii(allocator, &screen, 5, 1);
+    defer allocator.free(ascii);
+
+    try tui_test.expectAsciiEqual("╭─╮  ", ascii);
+}
+
+test "layout Text - accented characters" {
+    // Characters with combining marks: é can be e + combining acute
+    // But as a precomposed char (é U+00E9), it's single-width
+    var spans = [_]Text.Span{.{ .text = "café", .style = .{} }};
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans } },
+    };
+
+    const size = w.layout(boundsConstraints(20, 10));
+
+    try std.testing.expectEqual(@as(u16, 4), size.width);
+    try std.testing.expectEqual(@as(u16, 1), size.height);
+}
+
+test "render Text - accented characters" {
+    const allocator = std.testing.allocator;
+
+    var spans = [_]Text.Span{.{ .text = "café", .style = .{} }};
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans } },
+    };
+
+    _ = w.layout(boundsConstraints(6, 1));
+
+    var screen = try tui_test.createScreen(allocator, 6, 1);
+    defer screen.deinit(allocator);
+    const win = tui_test.windowFromScreen(&screen);
+
+    try w.renderTo(win, allocator);
+
+    const ascii = try tui_test.screenToAscii(allocator, &screen, 6, 1);
+    defer allocator.free(ascii);
+
+    try tui_test.expectAsciiEqual("café  ", ascii);
+}
+
+test "layout Text - CJK centered alignment" {
+    var spans = [_]Text.Span{.{ .text = "你好", .style = .{} }};
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans, .@"align" = .center } },
+    };
+
+    const size = w.layout(boundsConstraints(10, 1));
+
+    // Centered text takes full constraint width
+    try std.testing.expectEqual(@as(u16, 10), size.width);
+    try std.testing.expectEqual(@as(u16, 1), size.height);
+}
+
+test "render Text - CJK centered" {
+    const allocator = std.testing.allocator;
+
+    // "你好" = 4 columns, centered in 10 = 3 spaces on each side
+    var spans = [_]Text.Span{.{ .text = "你好", .style = .{} }};
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans, .@"align" = .center } },
+    };
+
+    _ = w.layout(boundsConstraints(10, 1));
+
+    var screen = try tui_test.createScreen(allocator, 10, 1);
+    defer screen.deinit(allocator);
+    const win = tui_test.windowFromScreen(&screen);
+
+    try w.renderTo(win, allocator);
+
+    const ascii = try tui_test.screenToAscii(allocator, &screen, 10, 1);
+    defer allocator.free(ascii);
+
+    try tui_test.expectAsciiEqual("   你好   ", ascii);
+}

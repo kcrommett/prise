@@ -20,7 +20,12 @@ pub fn screenToAscii(
 
     for (0..height) |row| {
         if (row != 0) try buf.append(allocator, '\n');
+        var skip_cols: u16 = 0;
         for (0..width) |col| {
+            if (skip_cols > 0) {
+                skip_cols -= 1;
+                continue;
+            }
             const cell = screen.readCell(@intCast(col), @intCast(row));
 
             if (cell) |c| {
@@ -31,6 +36,9 @@ pub fn screenToAscii(
                     try buf.append(allocator, g[0]);
                 } else {
                     try buf.appendSlice(allocator, g);
+                }
+                if (c.char.width > 1) {
+                    skip_cols = c.char.width - 1;
                 }
             } else {
                 try buf.append(allocator, ' ');
