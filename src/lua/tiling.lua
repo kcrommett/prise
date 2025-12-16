@@ -156,7 +156,7 @@ local POWERLINE_SYMBOLS = {
 
 ---Keybinds are a map from key_string to action name
 ---Example: ["<leader>v"] = "split_horizontal"
----@alias PriseKeybinds table<string, string>
+---@alias PriseKeybinds table<string, string|function>
 
 ---@class PriseBordersConfig
 ---@field enabled? boolean Show pane borders (default: false)
@@ -1863,7 +1863,7 @@ function M.update(event)
         init_keybinds()
         local result = state.keybind_matcher:handle_key(event.data)
 
-        if result.action then
+        if result.action or result.func then
             -- Cancel any pending timeout
             if state.timer then
                 state.timer:cancel()
@@ -1872,9 +1872,13 @@ function M.update(event)
             state.pending_command = false
 
             -- Dispatch action
-            local handler = action_handlers[result.action]
-            if handler then
-                handler()
+            if result.func then
+                result.func()
+            elseif result.action then
+                local handler = action_handlers[result.action]
+                if handler then
+                    handler()
+                end
             end
             prise.request_frame()
             return

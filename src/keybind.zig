@@ -110,8 +110,18 @@ fn matcherHandleKey(lua: *ziglua.Lua) i32 {
 
     switch (result) {
         .action => |a| {
-            _ = lua.pushString(a.action.toString());
-            lua.setField(-2, "action");
+            switch (a.action) {
+                .lua_function => |func_ref| {
+                    _ = lua.rawGetIndex(ziglua.registry_index, func_ref);
+                    lua.setField(-2, "func");
+                },
+                else => {
+                    if (a.action.toString()) |name| {
+                        _ = lua.pushString(name);
+                        lua.setField(-2, "action");
+                    }
+                },
+            }
 
             if (a.key_string) |ks| {
                 _ = lua.pushString(ks);
@@ -171,11 +181,11 @@ fn compile(lua: *ziglua.Lua) i32 {
     var bindings_list: std.ArrayListUnmanaged(Keybind) = .empty;
     defer bindings_list.deinit(allocator);
 
-    // Iterate over table as map: key_string => action
+    // Iterate over table as map: key_string => action_name | function
     lua.pushNil();
     while (lua.next(1)) {
         // Stack: key at -2, value at -1
-        if (lua.typeOf(-2) != .string or lua.typeOf(-1) != .string) {
+        if (lua.typeOf(-2) != .string) {
             lua.pop(1);
             continue;
         }
@@ -185,24 +195,43 @@ fn compile(lua: *ziglua.Lua) i32 {
             continue;
         };
 
-        const action_str = lua.toString(-1) catch {
+        const value_type = lua.typeOf(-1);
+
+        if (value_type == .string) {
+            const action_str = lua.toString(-1) catch {
+                lua.pop(1);
+                continue;
+            };
+
+            const action = Action.fromString(action_str) orelse {
+                lua.pop(1);
+                continue;
+            };
+
+            bindings_list.append(allocator, .{
+                .key_string = ks,
+                .action = action,
+            }) catch {
+                lua.raiseErrorStr("Out of memory", .{});
+            };
+
+            lua.pop(1);
+        } else if (value_type == .function) {
+            const func_ref = lua.ref(ziglua.registry_index) catch {
+                lua.raiseErrorStr("Failed to create function reference", .{});
+            };
+
+            bindings_list.append(allocator, .{
+                .key_string = ks,
+                .action = .{ .lua_function = func_ref },
+            }) catch {
+                lua.raiseErrorStr("Out of memory", .{});
+            };
+            // ref() already popped the value
+        } else {
             lua.pop(1);
             continue;
-        };
-
-        const action = Action.fromString(action_str) orelse {
-            lua.pop(1);
-            continue;
-        };
-
-        bindings_list.append(allocator, .{
-            .key_string = ks,
-            .action = action,
-        }) catch {
-            lua.raiseErrorStr("Out of memory", .{});
-        };
-
-        lua.pop(1); // Pop value, keep key for next iteration
+        }
     }
 
     const trie = allocator.create(Trie) catch {

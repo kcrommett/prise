@@ -2,7 +2,8 @@
 
 ---Result from keybind matcher handle_key
 ---@class KeybindMatchResult
----@field action? string Action name if matched
+---@field action? string Action name if matched (for built-in actions)
+---@field func? function Lua function if matched (for custom functions)
 ---@field key_string? string Original key string that matched
 ---@field pending? boolean True if key sequence in progress
 ---@field none? boolean True if no match
@@ -28,7 +29,7 @@ function KeybindMatcher:reset() end
 local KeybindModule = {}
 
 ---Compile keybinds into a matcher
----@param keybinds table<string, string> Map of key_string to action name
+---@param keybinds table<string, string|function> Map of key_string to action name or function
 ---@param leader? string Leader key sequence for <leader> expansion
 ---@return KeybindMatcher
 function KeybindModule.compile(keybinds, leader) end

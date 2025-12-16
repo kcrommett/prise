@@ -1,16 +1,16 @@
 //! Built-in actions for keybind system.
 //!
 //! Actions can be either:
-//! - Built-in: Maps to an Action enum value, executed by Lua command system
+//! - Built-in: Maps to an Action variant, executed by Lua command system
 //! - Custom: A Lua function reference, executed directly
 //!
 //! Built-in action names use snake_case and map to the commands table in tiling.lua.
 
 const std = @import("std");
 
-/// Built-in actions that can be bound to keys.
-/// Each action corresponds to a command in the Lua commands table.
-pub const Action = enum {
+/// Actions that can be bound to keys.
+/// Built-in actions have no payload; lua_function carries a registry ref.
+pub const Action = union(enum) {
     // Splitting
     split_horizontal,
     split_vertical,
@@ -59,18 +59,40 @@ pub const Action = enum {
     // UI
     command_palette,
 
+    // Lua function reference (registry ref)
+    lua_function: i32,
+
     /// Convert action to its canonical string name.
-    pub fn toString(self: Action) []const u8 {
-        return @tagName(self);
+    /// Returns null for lua_function since it has no string name.
+    pub fn toString(self: Action) ?[]const u8 {
+        return switch (self) {
+            .lua_function => null,
+            else => @tagName(self),
+        };
     }
 
     /// Parse an action from a string name.
     pub fn fromString(name: []const u8) ?Action {
-        return std.meta.stringToEnum(Action, name);
+        const Tag = @typeInfo(Action).@"union".tag_type.?;
+        const tag = std.meta.stringToEnum(Tag, name) orelse return null;
+        return fromTag(tag);
+    }
+
+    fn fromTag(tag: @typeInfo(Action).@"union".tag_type.?) ?Action {
+        return switch (tag) {
+            .lua_function => null,
+            inline else => |t| @unionInit(Action, @tagName(t), {}),
+        };
+    }
+
+    /// Check if this is a built-in action (not a lua function).
+    pub fn isBuiltin(self: Action) bool {
+        return self != .lua_function;
     }
 
     /// Get the display name for the command palette.
-    pub fn displayName(self: Action) []const u8 {
+    /// Returns null for lua_function.
+    pub fn displayName(self: Action) ?[]const u8 {
         return switch (self) {
             .split_horizontal => "Split Horizontal",
             .split_vertical => "Split Vertical",
@@ -104,24 +126,34 @@ pub const Action = enum {
             .rename_session => "Rename Session",
             .quit => "Quit",
             .command_palette => "Command Palette",
+            .lua_function => null,
         };
     }
 };
 
 test "action string roundtrip" {
-    const action = Action.split_horizontal;
-    const name = action.toString();
+    const action: Action = .split_horizontal;
+    const name = action.toString().?;
     const parsed = Action.fromString(name);
     try std.testing.expectEqual(action, parsed.?);
 }
 
 test "action from string" {
-    try std.testing.expectEqual(Action.focus_left, Action.fromString("focus_left").?);
-    try std.testing.expectEqual(Action.command_palette, Action.fromString("command_palette").?);
+    try std.testing.expectEqual(@as(Action, .focus_left), Action.fromString("focus_left").?);
+    try std.testing.expectEqual(@as(Action, .command_palette), Action.fromString("command_palette").?);
     try std.testing.expect(Action.fromString("invalid_action") == null);
 }
 
 test "action display names" {
-    try std.testing.expectEqualStrings("Split Horizontal", Action.split_horizontal.displayName());
-    try std.testing.expectEqualStrings("Command Palette", Action.command_palette.displayName());
+    const split: Action = .split_horizontal;
+    const palette: Action = .command_palette;
+    try std.testing.expectEqualStrings("Split Horizontal", split.displayName().?);
+    try std.testing.expectEqualStrings("Command Palette", palette.displayName().?);
+}
+
+test "lua_function has no string name" {
+    const action: Action = .{ .lua_function = 42 };
+    try std.testing.expect(action.toString() == null);
+    try std.testing.expect(action.displayName() == null);
+    try std.testing.expect(!action.isBuiltin());
 }
