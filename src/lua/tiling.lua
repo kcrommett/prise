@@ -953,35 +953,6 @@ local function contains_focused(node)
     return false
 end
 
----Get index of focused pane (1-based) and total count in active tab
----@return number index
----@return number total
-local function get_pane_position()
-    local root = get_active_root()
-    if not root or not state.focused_id then
-        return 1, 1
-    end
-
-    local index = 0
-    local found_index = 1
-
-    local function walk(node)
-        if is_pane(node) then
-            index = index + 1
-            if node.id == state.focused_id then
-                found_index = index
-            end
-        elseif is_split(node) then
-            for _, child in ipairs(node.children) do
-                walk(child)
-            end
-        end
-    end
-
-    walk(root)
-    return found_index, index
-end
-
 ---Serialize a node tree to a table with pty_ids instead of userdata
 ---@param node? Node
 ---@param cwd_lookup? fun(pty_id: number): string?

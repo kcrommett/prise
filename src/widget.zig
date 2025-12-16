@@ -635,6 +635,7 @@ pub const Widget = struct {
             .positioned => |pos| {
                 try pos.child.collectSurfaceResizesRecursive(allocator, resizes);
             },
+            .separator => {},
         }
     }
 };
