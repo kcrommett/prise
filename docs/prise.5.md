@@ -178,6 +178,74 @@ ui.setup({
 })
 ```
 
+# CUSTOM KEYBINDS
+
+The **keybinds** table maps vim-style key strings to either built-in actions
+or custom Lua functions.
+
+Each entry maps a key string to:
+
+- A **string**: The name of a built-in action (e.g., "split_horizontal")
+- A **function**: A custom Lua function to execute
+
+Key strings use vim-style notation with angle brackets for modifiers and
+special keys. Plain characters can be written directly.
+
+## Modifiers
+
+- **\<C-x\>** - Ctrl+x
+- **\<A-x\>** - Alt+x
+- **\<S-x\>** - Shift+x
+- **\<D-x\>** - Super/Cmd+x
+- **\<leader\>** - Expands to the configured leader key
+
+Modifiers can be combined: **\<C-A-x\>** for Ctrl+Alt+x, **\<C-S-D-a\>** for
+Ctrl+Shift+Super+a.
+
+## Special Keys
+
+- **\<Enter\>**, **\<Return\>**, **\<CR\>** - Enter key
+- **\<Tab\>** - Tab key
+- **\<Esc\>**, **\<Escape\>** - Escape key
+- **\<Space\>** - Space bar
+- **\<BS\>**, **\<Backspace\>** - Backspace key
+- **\<Del\>**, **\<Delete\>** - Delete key
+- **\<Up\>**, **\<Down\>**, **\<Left\>**, **\<Right\>** - Arrow keys
+- **\<Home\>**, **\<End\>** - Home/End keys
+- **\<PageUp\>**, **\<PageDown\>** - Page Up/Down keys
+- **\<Insert\>** - Insert key
+- **\<F1\>** through **\<F12\>** - Function keys
+
+## Examples
+
+- **a** - The letter "a"
+- **\<C-a\>** - Ctrl+a
+- **\<D-k\>v** - Super+k followed by v
+- **\<leader\>s** - Leader followed by s
+- **\<C-S-Tab\>** - Ctrl+Shift+Tab
+
+Example:
+
+```lua
+local prise = require("prise")
+local ui = prise.tiling()
+
+ui.setup({
+    leader = "<C-a>",  -- Use Ctrl+a as leader
+    keybinds = {
+        -- Built-in action
+        ["<leader>v"] = "split_horizontal",
+
+        -- Custom function
+        ["<leader>g"] = function()
+            prise.log.info("Custom keybind executed!")
+        end,
+    },
+})
+
+return ui
+```
+
 # DEFAULT KEYBINDS
 
 The tiling UI uses a leader key sequence. Press the leader key (default:

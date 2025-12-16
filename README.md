@@ -199,6 +199,28 @@ The default leader key is `Super+k` (Cmd+k on macOS). After pressing the leader:
 
 Press `Super+p` to open the command palette.
 
+### Custom Keybinds
+
+You can add custom keybinds that trigger built-in actions or custom Lua functions:
+
+```lua
+local prise = require("prise")
+local ui = prise.tiling()
+
+ui.setup({
+    leader = "<C-a>",  -- Use Ctrl+a as leader (like tmux)
+    keybinds = {
+        ["<leader>g"] = function()
+            prise.log.info("Custom keybind!")
+        end,
+    },
+})
+
+return ui
+```
+
+See `prise(5)` for the full key string syntax.
+
 ## Lua LSP Setup
 
 Prise installs type definitions to `<prefix>/share/prise/lua/`. To get autocomplete and type checking in your editor, add this path to your Lua language server configuration.
