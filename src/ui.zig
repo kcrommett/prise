@@ -933,6 +933,14 @@ pub const UI = struct {
         _ = loop;
         const ctx = completion.userdataCast(TimerContext);
 
+        // Check for errors (e.g., signal interrupt, cancellation)
+        if (completion.result == .err) {
+            // Timer was interrupted or cancelled, just cleanup
+            ctx.ui.lua.unref(ziglua.registry_index, ctx.timer_ref);
+            ctx.ui.allocator.destroy(ctx);
+            return;
+        }
+
         // Get Timer userdata
         _ = ctx.ui.lua.rawGetIndex(ziglua.registry_index, ctx.timer_ref);
         const timer = ctx.ui.lua.toUserdata(Timer, -1) catch unreachable;

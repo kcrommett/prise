@@ -257,7 +257,10 @@ pub const Loop = struct {
             _ = try self.ring.submit();
 
             const wait_nr: u32 = if (mode == .once) 0 else 1;
-            const n = try self.ring.copy_cqes(&cqes, wait_nr);
+            const n = self.ring.copy_cqes(&cqes, wait_nr) catch |err| switch (err) {
+                error.SignalInterrupt => continue,
+                else => return err,
+            };
 
             if (n == 0 and mode == .once) break;
 
@@ -305,6 +308,7 @@ pub const Loop = struct {
             .CONNREFUSED => error.ConnectionRefused,
             .INPROGRESS, .AGAIN => error.WouldBlock,
             .CANCELED => error.Canceled,
+            .INTR => error.SignalInterrupt,
             else => error.IOError,
         };
     }
